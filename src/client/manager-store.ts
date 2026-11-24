@@ -1,41 +1,78 @@
 /**
- * The panel's view of the Host, held in the official client store.
+ * The panel's data layer, held in the official client store.
  *
- * `@deepseek-ai/dsh-client-store` is the snapshot store the Web shell seeds for
- * every plugin, so the page keeps its data where the rest of the product keeps
- * its own: one reference-stable snapshot, one subscription, and a single write
- * face. The component therefore reads with `useSyncExternalStore` and never
- * owns the request bookkeeping.
+ * Three sources feed one reference-stable snapshot:
  *
- * What the store buys beyond tidiness is testability. The panel's load rule —
- * a monotonic sequence, where only the newest request may publish and a failed
- * poll never discards a standing snapshot — used to live inside the component's
- * effects, where the only way to observe it was a jsdom test that waited out a
- * real poll interval. It is now plain code over a fake transport.
+ * 1. the Host's `snapshot` RPC (file scopes, registration outcomes, tools);
+ * 2. the official `mcpManager.watch` stream (live status and OAuth attempts);
+ * 3. the two official shared forms (`mcp-manager` entries and this plugin's
+ *    own `disabledTools`), which the Host writes through the settings service.
  *
- * `mcp.json` reads, `mcp.json` writes, and runtime status all come from the
- * manager's own RPC; the legacy entry scope is not here, because the browser
- * edits it through the official shared settings form (`./entry-form.ts`).
+ * Live status is push-based, so the file snapshot can poll at a calm interval
+ * without making the page feel stale. Every operation publishes through this
+ * store, and a monotonic sequence keeps a slow read from overwriting a newer
+ * one.
  */
 
+import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type { McpManagedServerView } from '@deepseek-ai/dsh-mcp-manager'
+import type { McpProbeResult } from '@deepseek-ai/dsh-mcp-client/types'
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { Snapshot } from '../types.ts'
+import type { AuthorizationResult, ManagedServerView, McpScope, ServerPatch, Snapshot } from '../types.ts'
 import type { ManagerClientApi } from './api.ts'
+import type { FormState, OwnFormFace, UpstreamFormFace } from './entry-form.ts'
+import type { EntryServer, ServerSummary, UpstreamConfig } from './summary.ts'
+import type { McpLocaleKey } from './locales.ts'
 
-/** How often a visible page re-reads the Host. */
+/** How often a visible page re-reads the file scopes and tools. */
 const POLL_INTERVAL_MS = 2_000
+
+interface StreamItem<T> {
+  readonly value: T
+  accept(): void
+}
+
+interface StreamHandle<T> extends AsyncIterable<StreamItem<T>> {
+  dispose?(): void
+}
+
+interface RemoteResultLike<T> {
+  readonly ok: boolean
+  readonly value?: T
+  readonly error?: { readonly code?: string; readonly message?: string }
+}
+
+interface McpManagerRemote {
+  watch(signal: AbortSignal): StreamHandle<readonly McpManagedServerView[]>
+  restart(name: string): Promise<RemoteResultLike<void>>
+  probe(name: string, signal?: AbortSignal): Promise<RemoteResultLike<McpProbeResult>>
+}
+
+interface StreamFactory {
+  $stream<T>(options: {
+    readonly name: string
+    readonly open: (signal: AbortSignal) => StreamHandle<T>
+    readonly ended: () => Error
+    readonly carrierFailed: () => void
+  }): StreamHandle<T>
+  readonly mcpManager: McpManagerRemote
+}
+
+export interface ManagerNotice {
+  readonly tone: 'success' | 'error'
+  readonly text: string
+}
 
 /**
  * Everything the page renders, plus the state its operations own.
  *
  * The fields are mutable because `SnapshotStore.update` hands the mutator this
  * exact type; the store freezes every published snapshot, so nothing outside a
- * mutator can actually write one.
+ * mutator can write one.
  */
 export interface ManagerView {
-  /** `loading` until the first answer, `error` when none ever arrived. */
   status: 'loading' | 'ready' | 'error'
-  /** The last accepted snapshot; undefined until the first one. */
   snapshot: Snapshot | undefined
   /** The first read's failure, while no snapshot stands. */
   error: string | undefined
@@ -43,187 +80,338 @@ export interface ManagerView {
   pollFailed: boolean
   /** A user operation is crossing the wire. */
   busy: boolean
-  /** The last operation's refusal or failure, until the next operation. */
-  message: string | undefined
-  /** Registered workspace root the project scope is read and written against. */
+  /** The last operation's refusal, or a success confirmation (already translated by the caller). */
+  notice: ManagerNotice | undefined
+  /** The official manager's live list, or the last list received. */
+  managed: readonly McpManagedServerView[]
+  /** The status stream's carrier failed; the page keeps the last list. */
+  streamFailed: boolean
+  /** The official `mcp-manager` entry form. */
+  upstream: FormState<UpstreamConfig>
+  /** This plugin's own entry form (`disabledTools`). */
+  own: FormState<{ disabledTools?: Record<string, string[]> }>
+  /** Registered workspace root the project scope reads and writes. */
   projectPath: string | undefined
+  /** Last successful read, epoch milliseconds. */
+  updatedAt: number | undefined
 }
 
 export interface ManagerStore {
-  /** The official snapshot store the component subscribes to. */
   readonly state: SnapshotStore<ManagerView>
-  /** Root the project scope at another workspace and re-read. */
-  selectProject: (projectPath: string | undefined) => void
-  /** Show one message the store did not derive from a request. */
-  notify: (message: string) => void
-  /** Dismiss the current action message. */
-  clearMessage: () => void
-  /** Run one RPC operation whose answer IS the next snapshot. */
-  run: (operation: () => Promise<Snapshot>) => Promise<Snapshot | undefined>
-  /** Re-read the Host as a user action (the refresh control). */
-  refresh: () => Promise<void>
-  /**
-   * Run one official-form write.
-   *
-   * The form answers with acceptance rather than a snapshot — it owns revision
-   * fencing and has already reloaded its own state on a refusal — so the page
-   * reports a refusal and re-reads through its own RPC, which stays the single
-   * place the merged `project → profile → user → entry` view is computed.
-   * @param operation - the write, answering whether the Host accepted it.
-   * @param refusedMessage - the copy to show when it did not.
-   * @returns whether the write was accepted.
-   */
-  runForm: (operation: () => Promise<boolean>, refusedMessage: string) => Promise<boolean>
-  /**
-   * Read once and keep reading while the document is visible.
-   * @param intervalMs - poll period; the default is production's.
-   * @returns the stopper.
-   */
-  startPolling: (intervalMs?: number) => () => void
+  selectProject(projectPath: string | undefined): void
+  refresh(): void
+  notify(text: string, tone?: ManagerNotice['tone']): void
+  clearNotice(): void
+  upsertServer(request: { readonly scope: McpScope; readonly server: ServerPatch }): Promise<boolean>
+  removeServer(row: ServerSummary): Promise<boolean>
+  setEnabled(row: ServerSummary, enabled: boolean): Promise<boolean>
+  restart(name: string): Promise<boolean>
+  probe(name: string): Promise<{ readonly ok: true; readonly result: McpProbeResult } | { readonly ok: false; readonly message: string }>
+  authorize(name: string): Promise<AuthorizationResult | undefined>
+  cancelAuthorization(name: string, id: string): Promise<boolean>
+  signOut(name: string): Promise<boolean>
+  saveEntry(name: string, entry: EntryServer): Promise<boolean>
+  removeEntry(name: string): Promise<boolean>
+  setEntryEnabled(name: string, enabled: boolean): Promise<boolean>
+  setToolEnabled(server: string, tool: string, enabled: boolean): Promise<boolean>
+  dispose(): void
 }
 
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
-export function createManagerStore(api: ManagerClientApi): ManagerStore {
-  const state = createSnapshotStore<ManagerView>({
+/**
+ * Create the store and start its read loop.
+ * @param ctx - the browser plugin context (connection, remote, forms).
+ * @param api - the Host RPC face.
+ * @param upstream - the official entry form face.
+ * @param own - this plugin's entry form face.
+ * @param translate - the page translator, used for notices.
+ */
+export function createManagerStore(
+  ctx: Context,
+  api: ManagerClientApi,
+  upstream: UpstreamFormFace,
+  own: OwnFormFace,
+  translate: (key: McpLocaleKey, params?: Record<string, unknown>) => string,
+): ManagerStore {
+  const initial: ManagerView = {
     status: 'loading',
     snapshot: undefined,
     error: undefined,
     pollFailed: false,
     busy: false,
-    message: undefined,
+    notice: undefined,
+    managed: [],
+    streamFailed: false,
+    upstream: upstream.snapshot(),
+    own: own.snapshot(),
     projectPath: undefined,
-  })
-
-  /**
-   * Monotonic request sequence.
-   *
-   * Every read — poll, refresh, or the re-read after a write — reserves the
-   * next number before it starts, and only the newest reservation may publish.
-   * A slow answer therefore cannot overwrite a newer one, whichever order they
-   * settle in.
-   */
+    updatedAt: undefined,
+  }
+  const state = createSnapshotStore<ManagerView>(initial)
+  let disposed = false
   let sequence = 0
-  /** At most one background read in flight, so a slow Host is not overlapped. */
-  let pollInFlight = false
+  let pollTimer: ReturnType<typeof setInterval> | undefined
+  let stream: StreamHandle<readonly McpManagedServerView[]> | undefined
+  let streamAbort: AbortController | undefined
+  let observing: Promise<void> | undefined
+  const disposers: (() => void)[] = []
+  const t = translate
 
-  const nextSequence = (): number => {
-    sequence += 1
-    return sequence
+  const patch = (mutate: (draft: ManagerView) => void): void => { state.update(mutate) }
+
+  const requestRefresh = (): void => {
+    if (disposed) return
+    const current = state.getSnapshot()
+    const request = ++sequence
+    void api.snapshot(current.projectPath === undefined ? {} : { projectPath: current.projectPath }, streamAbort?.signal)
+      .then((snapshot) => {
+        if (disposed || request !== sequence) return
+        patch((draft) => {
+          draft.status = 'ready'
+          draft.snapshot = snapshot
+          draft.error = undefined
+          draft.pollFailed = false
+          draft.projectPath = snapshot.projectPath
+          draft.updatedAt = Date.now()
+        })
+      })
+      .catch((error: unknown) => {
+        if (disposed || request !== sequence) return
+        const message = errorMessage(error)
+        patch((draft) => {
+          if (draft.snapshot === undefined) {
+            draft.status = 'error'
+            draft.error = message
+          } else {
+            draft.pollFailed = true
+          }
+        })
+      })
   }
 
-  const accept = (responseSequence: number, snapshot: Snapshot): boolean => {
-    if (responseSequence !== sequence) return false
-    state.update((draft) => {
-      draft.status = 'ready'
-      draft.snapshot = snapshot
-      draft.error = undefined
-      draft.pollFailed = false
+  const begin = (): void => { patch((draft) => { draft.busy = true }) }
+  const end = (): void => { patch((draft) => { draft.busy = false }) }
+  const succeed = (text: string): void => { patch((draft) => { draft.notice = { tone: 'success', text } }) }
+  const fail = (error: unknown): void => { patch((draft) => { draft.notice = { tone: 'error', text: t('notice.failed', { message: errorMessage(error) }) } }) }
+
+  const disposeStream = (): void => {
+    try { stream?.dispose?.() } catch { /* teardown is best effort */ }
+    stream = undefined
+    try { streamAbort?.abort() } catch { /* already gone */ }
+    streamAbort = undefined
+  }
+
+  const openStream = (): void => {
+    if (disposed) return
+    disposeStream()
+    const remote = (ctx.remote as unknown as StreamFactory)
+    const controller = new AbortController()
+    streamAbort = controller
+    const handle = remote.$stream<readonly McpManagedServerView[]>({
+      name: 'MCP server status',
+      open: signal => remote.mcpManager.watch(signal),
+      ended: () => new Error('MCP server status stream ended'),
+      carrierFailed: () => {
+        if (!disposed) patch((draft) => { draft.streamFailed = true })
+      },
     })
-    return true
+    stream = handle
+    observing = (async () => {
+      try {
+        for await (const item of handle) {
+          if (disposed) return
+          patch((draft) => {
+            draft.managed = item.value
+            draft.streamFailed = false
+          })
+          item.accept()
+        }
+      } catch {
+        if (!disposed) patch((draft) => { draft.streamFailed = true })
+      }
+    })()
   }
 
-  const fail = (error: unknown): void => {
-    state.update((draft) => { draft.message = messageOf(error) })
+  const startPolling = (): void => {
+    if (pollTimer !== undefined) return
+    pollTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      requestRefresh()
+    }, POLL_INTERVAL_MS)
   }
 
-  const run = async (operation: () => Promise<Snapshot>): Promise<Snapshot | undefined> => {
-    state.update((draft) => { draft.busy = true; draft.message = undefined })
+  const applyOperation = async (operation: () => Promise<void>, success: string): Promise<boolean> => {
+    if (state.getSnapshot().busy) return false
+    begin()
     try {
-      const responseSequence = nextSequence()
-      const next = await operation()
-      accept(responseSequence, next)
-      return next
+      await operation()
+      succeed(success)
+      requestRefresh()
+      return true
     } catch (error) {
       fail(error)
-      return undefined
+      return false
     } finally {
-      state.update((draft) => { draft.busy = false })
+      end()
     }
   }
 
-  const read = async (signal?: AbortSignal): Promise<void> => {
-    if (pollInFlight) return
-    pollInFlight = true
-    const responseSequence = nextSequence()
-    try {
-      accept(responseSequence, await api.snapshot({ projectPath: state.getSnapshot().projectPath }, signal))
-    } catch (error) {
-      // A deliberate teardown is not a failure, and a background failure says
-      // so in place: the standing snapshot keeps serving and the action message
-      // belongs to the user's last operation.
-      if (signal?.aborted === true || responseSequence !== sequence) return
-      state.update((draft) => {
-        draft.pollFailed = true
-        if (draft.status !== 'ready') {
-          draft.status = 'error'
-          draft.error = messageOf(error)
-        }
-      })
-    } finally {
-      pollInFlight = false
-    }
+  disposers.push(upstream.subscribe(() => {
+    patch((draft) => { draft.upstream = upstream.snapshot() })
+  }))
+  disposers.push(own.subscribe(() => {
+    patch((draft) => { draft.own = own.snapshot() })
+  }))
+  const onReset = (): void => {
+    requestRefresh()
+    openStream()
   }
+  disposers.push(ctx.on('connection/reset', onReset))
+  const onVisibility = (): void => {
+    if (document.visibilityState === 'visible') requestRefresh()
+  }
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
+  disposers.push(() => {
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
+  })
 
-  return {
+  openStream()
+  requestRefresh()
+  startPolling()
+
+  const store: ManagerStore = {
     state,
     selectProject: (projectPath) => {
-      state.update((draft) => { draft.projectPath = projectPath })
-      void run(() => api.snapshot({ projectPath }))
+      patch((draft) => { draft.projectPath = projectPath })
+      requestRefresh()
     },
-    notify: (message) => { state.update((draft) => { draft.message = message }) },
-    clearMessage: () => { state.update((draft) => { draft.message = undefined }) },
-    run: operation => run(operation),
-    refresh: async () => {
-      await run(() => api.snapshot({ projectPath: state.getSnapshot().projectPath }))
+    refresh: requestRefresh,
+    notify: (text, tone = 'success') => {
+      patch((draft) => { draft.notice = { tone, text } })
     },
-    runForm: async (operation, refusedMessage) => {
-      state.update((draft) => { draft.busy = true; draft.message = undefined })
+    clearNotice: () => {
+      patch((draft) => { draft.notice = undefined })
+    },
+    upsertServer: request => applyOperation(
+      async () => { await api.upsertServer({ scope: request.scope, server: request.server, ...currentProject(state) }) },
+      t('notice.saved', { name: request.server.id }),
+    ),
+    removeServer: row => {
+      if (row.kind === 'entry') return store.removeEntry(row.name)
+      return applyOperation(
+        async () => { await api.removeServer({ id: row.name, ...currentProject(state) }) },
+        t('notice.deleted', { name: row.name }),
+      )
+    },
+    setEnabled: (row, enabled) => {
+      if (row.kind === 'entry') return store.setEntryEnabled(row.name, enabled)
+      return applyOperation(
+        async () => { await api.setServerEnabled({ id: row.name, enabled, ...currentProject(state) }) },
+        t(enabled ? 'notice.enabled' : 'notice.disabled', { name: row.name }),
+      )
+    },
+    restart: name => applyOperation(
+      async () => {
+        const result = await (ctx.remote as unknown as StreamFactory).mcpManager.restart(name)
+        if (!result.ok) throw new Error(remoteErrorText(result))
+      },
+      t('notice.restarted', { name }),
+    ),
+    probe: async (name) => {
+      const remote = (ctx.remote as unknown as StreamFactory).mcpManager
+      const controller = new AbortController()
+      const timer = setTimeout(() => { controller.abort() }, 20_000)
       try {
-        if (!await operation()) {
-          state.update((draft) => { draft.message = refusedMessage })
-          return false
+        const result = await remote.probe(name, controller.signal)
+        if (!result.ok || result.value === undefined) {
+          patch((draft) => { draft.notice = { tone: 'error', text: t('notice.probeFailed', { name }) } })
+          return { ok: false, message: remoteErrorText(result) }
         }
-        const responseSequence = nextSequence()
-        accept(responseSequence, await api.snapshot({ projectPath: state.getSnapshot().projectPath }))
-        return true
+        patch((draft) => {
+          draft.notice = result.value?.ok === true
+            ? { tone: 'success', text: t('notice.probeOk', { name }) }
+            : { tone: 'error', text: t('notice.probeFailed', { name }) }
+        })
+        return { ok: true, result: result.value }
       } catch (error) {
         fail(error)
-        return false
+        return { ok: false, message: errorMessage(error) }
       } finally {
-        state.update((draft) => { draft.busy = false })
+        clearTimeout(timer)
       }
     },
-    startPolling: (intervalMs = POLL_INTERVAL_MS) => {
-      const controller = new AbortController()
-      let timer: ReturnType<typeof setInterval> | undefined
-      const visible = (): boolean => document.visibilityState === 'visible'
-      const tick = (): void => { if (visible()) void read(controller.signal) }
-      const start = (): void => {
-        if (!visible() || timer !== undefined) return
-        timer = setInterval(tick, intervalMs)
+    authorize: async (name) => {
+      begin()
+      try {
+        const result = await api.authorize({ name })
+        patch((draft) => { draft.notice = { tone: 'success', text: t('notice.authorized') } })
+        requestRefresh()
+        return result
+      } catch (error) {
+        fail(error)
+        return undefined
+      } finally {
+        end()
       }
-      const stop = (): void => {
-        if (timer === undefined) return
-        clearInterval(timer)
-        timer = undefined
+    },
+    cancelAuthorization: (name, id) => applyOperation(
+      async () => { await api.cancelAuthorization({ name, id }) },
+      t('notice.authorized'),
+    ),
+    signOut: name => applyOperation(
+      async () => { await api.signOut({ name }) },
+      t('notice.signedOut', { name }),
+    ),
+    saveEntry: (name, entry) => applyOperation(
+      async () => { if (!(await upstream.setServer(name, entry))) throw new Error(t('editor.conflict')) },
+      t('notice.saved', { name }),
+    ),
+    removeEntry: name => applyOperation(
+      async () => { if (!(await upstream.removeServer(name))) throw new Error(t('editor.conflict')) },
+      t('notice.deleted', { name }),
+    ),
+    setEntryEnabled: (name, enabled) => applyOperation(
+      async () => { if (!(await upstream.setEnabled(name, enabled))) throw new Error(t('editor.conflict')) },
+      t(enabled ? 'notice.enabled' : 'notice.disabled', { name }),
+    ),
+    setToolEnabled: (server, tool, enabled) => {
+      const current = state.getSnapshot().own.value?.disabledTools?.[server] ?? []
+      const next = enabled ? current.filter(name => name !== tool) : [...new Set([...current, tool])]
+      begin()
+      try {
+        return own.setDisabledTools(server, next).then((accepted) => {
+          if (accepted) requestRefresh()
+          return accepted
+        }, () => false).finally(() => { end() })
+      } catch {
+        end()
+        return Promise.resolve(false)
       }
-      const onVisibility = (): void => {
-        stop()
-        if (!visible()) return
-        tick()
-        start()
-      }
-      tick()
-      start()
-      document.addEventListener('visibilitychange', onVisibility)
-      return () => {
-        controller.abort()
-        stop()
-        document.removeEventListener('visibilitychange', onVisibility)
-      }
+    },
+    dispose: () => {
+      if (disposed) return
+      disposed = true
+      if (pollTimer !== undefined) clearInterval(pollTimer)
+      pollTimer = undefined
+      for (const dispose of disposers.splice(0)) dispose()
+      disposeStream()
+      void observing
     },
   }
+  return store
+}
+
+/** The project target every file write carries, or nothing when none is selected. */
+function currentProject(state: SnapshotStore<ManagerView>): { projectPath?: string } {
+  const projectPath = state.getSnapshot().projectPath
+  return projectPath === undefined ? {} : { projectPath }
+}
+
+function remoteErrorText(result: RemoteResultLike<unknown>): string {
+  const error = result.error
+  if (error === undefined) return 'remote call failed'
+  return error.message ?? error.code ?? 'remote call failed'
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

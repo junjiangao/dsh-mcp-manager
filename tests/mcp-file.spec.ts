@@ -12,7 +12,7 @@ import {
   MCP_COMPAT_FILE_NAME, MCP_FILE_NAME, MCP_PROJECT_DIR, mutateScopeFile, readScopeFiles, readScopePath, resolveScopeFiles, watchScopeFiles,
 } from '../src/host/mcp-file.ts'
 import { withServer } from '../src/host/mcp-json.ts'
-import { defaultServer } from '../src/settings.ts'
+import { defaultServer } from '../src/server-config.ts'
 
 const roots: string[] = []
 

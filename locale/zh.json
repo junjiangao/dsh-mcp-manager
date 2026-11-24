@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Web MCP 管理器",
-    "description": "在设置页管理自有的 MCP 服务：新增、启停、重新加载，并按服务开关工具。"
+    "title": "MCP 管理器",
+    "description": "在设置页统一管理官方 mcp-manager 条目与项目、配置、用户三级 mcp.json：实时状态、重启、探测、工具开关与 OAuth。"
   }
 }

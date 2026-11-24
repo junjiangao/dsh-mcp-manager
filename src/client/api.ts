@@ -2,13 +2,12 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ClientConnectionRpc } from '@deepseek-ai/dsh-client-connection/client'
-import type {
-  ManagerRpcEndpoint, RemoveServerRequest, ReloadServerRequest, RpcError, SetServerEnabledRequest,
-  Snapshot, SnapshotRequest, UpsertServerRequest,
-} from '../types.ts'
-import { isRpcResult } from '../types.ts'
 import type {} from '@deepseek-ai/dsh-client-connection/client'
-import { MCP_MANAGER_API_CHANNEL, MCP_MANAGER_ENDPOINT_PREFIX } from '../types.ts'
+import {
+  isRpcResult, MCP_MANAGER_API_CHANNEL, MCP_MANAGER_ENDPOINT_PREFIX, type AuthorizationResult, type AuthorizeRequest,
+  type CancelAuthorizationRequest, type ManagerRpcEndpoint, type RemoveServerRequest, type RpcError, type SetServerEnabledRequest,
+  type SignOutRequest, type Snapshot, type SnapshotRequest, type UpsertServerRequest,
+} from '../types.ts'
 
 export class McpManagerRpcError extends Error {
   readonly code: RpcError['code']
@@ -21,18 +20,21 @@ export class McpManagerRpcError extends Error {
 }
 
 /**
- * The manager's own RPC covers the `mcp.json` scopes and runtime status.
+ * The manager's own RPC covers exactly what no official service owns: the
+ * `mcp.json` file scopes and the Host-only OAuth operations.
  *
- * The Loader-entry scope is absent here by design: it is a plugin's own
- * configuration, so the panel edits it through the official shared settings
- * form (see `./entry-form.ts`) rather than through this channel.
+ * Live status, restart, and probe are the official `mcpManager` Remote
+ * methods; the official `mcp-manager` entry and this plugin's own entry are
+ * edited through `ctx.configForms`. Nothing here duplicates those.
  */
 export interface ManagerClientApi {
   snapshot(request?: SnapshotRequest, signal?: AbortSignal): Promise<Snapshot>
   upsertServer(request: UpsertServerRequest, signal?: AbortSignal): Promise<Snapshot>
   removeServer(request: RemoveServerRequest, signal?: AbortSignal): Promise<Snapshot>
   setServerEnabled(request: SetServerEnabledRequest, signal?: AbortSignal): Promise<Snapshot>
-  reloadServer(request: ReloadServerRequest, signal?: AbortSignal): Promise<Snapshot>
+  authorize(request: AuthorizeRequest, signal?: AbortSignal): Promise<AuthorizationResult>
+  cancelAuthorization(request: CancelAuthorizationRequest, signal?: AbortSignal): Promise<null>
+  signOut(request: SignOutRequest, signal?: AbortSignal): Promise<null>
 }
 
 export function createManagerApi(ctx: Context): ManagerClientApi {
@@ -55,6 +57,8 @@ export function createManagerApi(ctx: Context): ManagerClientApi {
     upsertServer: (request, signal) => call<Snapshot>('upsertServer', request, signal),
     removeServer: (request, signal) => call<Snapshot>('removeServer', request, signal),
     setServerEnabled: (request, signal) => call<Snapshot>('setServerEnabled', request, signal),
-    reloadServer: (request, signal) => call<Snapshot>('reloadServer', request, signal),
+    authorize: (request, signal) => call<AuthorizationResult>('authorize', request, signal),
+    cancelAuthorization: (request, signal) => call<null>('cancelAuthorization', request, signal),
+    signOut: (request, signal) => call<null>('signOut', request, signal),
   }
 }

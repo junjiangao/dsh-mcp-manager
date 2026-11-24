@@ -177,3 +177,60 @@ export function SegmentedControl<Value extends string>({ id, value, options, onC
     </div>
   )
 }
+
+/** Real: a portal root with a labelled dialog, backdrop, and a narrow/footer layout. */
+export function Modal({ open, title, closeLabel, description, children, footer, className }: {
+  open: boolean
+  onClose: () => void
+  title: string
+  closeLabel: string
+  description?: string
+  children?: React.ReactNode
+  footer?: React.ReactNode
+  className?: string
+  contentClassName?: string
+  headless?: boolean
+  backdropBlur?: boolean
+  shortcutModal?: boolean
+  tone?: 'default' | 'danger'
+}): React.JSX.Element | null {
+  if (!open) return null
+  return (
+    <div role="dialog" aria-label={title} className={className}>
+      <h2>{title}</h2>
+      <button type="button" aria-label={closeLabel} onClick={() => {}}>{closeLabel}</button>
+      {description !== undefined && <p>{description}</p>}
+      {children}
+      {footer}
+    </div>
+  )
+}
+
+/** Real: decorative 16px outline glyphs; the panel supplies size and colour. */
+export function IconPlusOutlineRegular({ size = 16, className }: { size?: number; className?: string }): React.JSX.Element {
+  return <span className={className} data-icon="plus" data-size={size} aria-hidden="true" />
+}
+
+export function IconRefreshOutlineRegular({ size = 16, className }: { size?: number; className?: string }): React.JSX.Element {
+  return <span className={className} data-icon="refresh" data-size={size} aria-hidden="true" />
+}
+
+export function IconCloseOutlineRegular({ size = 16, className }: { size?: number; className?: string }): React.JSX.Element {
+  return <span className={className} data-icon="close" data-size={size} aria-hidden="true" />
+}
+
+export function IconCopyOutlineRegular({ size = 16, className }: { size?: number; className?: string }): React.JSX.Element {
+  return <span className={className} data-icon="copy" data-size={size} aria-hidden="true" />
+}
+
+export function IconEditOutlineRegular({ size = 16, className }: { size?: number; className?: string }): React.JSX.Element {
+  return <span className={className} data-icon="edit" data-size={size} aria-hidden="true" />
+}
+
+export function IconPlayOutlineRegular({ size = 16, className }: { size?: number; className?: string }): React.JSX.Element {
+  return <span className={className} data-icon="play" data-size={size} aria-hidden="true" />
+}
+
+export function IconLinkOutlineRegular({ size = 16, className }: { size?: number; className?: string }): React.JSX.Element {
+  return <span className={className} data-icon="link" data-size={size} aria-hidden="true" />
+}

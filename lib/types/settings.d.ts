@@ -1,54 +1,35 @@
-/** Host settings schema and defaults for the MCP manager namespace. */
+/** Host settings schema for this plugin's own Loader entry. */
 import type { Volatile } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { SettingsNamespace as DshSettingsNamespace } from '@deepseek-ai/dsh-settings';
-import type { ReconnectPolicy, ServerTransport, SettingsDocument, StoredReconnectPolicy, StoredServer } from './types.ts';
+import { type ServerTransport } from './types.ts';
 export declare const MANAGER_NAMESPACE: DshSettingsNamespace;
-export declare const DEFAULT_RECONNECT: StoredReconnectPolicy;
-export declare const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000;
 /**
  * The Loader entry's schema, which is also the form the settings page renders.
  *
- * dsh 0.2.0-rc.1 owns plugin configuration through the entry itself: there is no
- * `settings.register()` any more, so the two top-level fields are declared
- * `volatile()` — the whole subtree of each becomes live, which is what lets a
- * committed edit reach the running controller without re-registering it.
+ * The `mcp.json` file scopes and the official `mcp-manager` configuration are
+ * edited elsewhere; this entry owns one field only: the per-server list of
+ * public tool names the panel disables. It is `volatile()` so a committed edit
+ * reaches the running guard without re-registering the plugin.
  */
 export declare const Config: z<ManagerSettingsInput, ManagerSettings>;
 /** The schema under its historical name; both refer to the same entry config. */
 export declare const ManagerSettingsSchema: z<ManagerSettingsInput, ManagerSettings>;
 /** The shape a composition file writes: plain values, every field optional. */
 export interface ManagerSettingsInput {
-    /** Configured MCP servers keyed by id. */
-    servers?: Record<string, StoredServer>;
     /** Per-server disabled tool names. */
     disabledTools?: Record<string, string[]>;
 }
-/**
- * Resolved manager config as the Host hands it to `apply`: each field is a
- * live ref, read per operation rather than captured once at load.
- */
+/** Resolved manager config as the Host hands it to `apply`: a live ref. */
 export interface ManagerSettings {
-    /** Configured MCP servers keyed by id. */
-    servers: Volatile<Record<string, StoredServer>>;
     /** Per-server disabled tool names. */
     disabledTools: Volatile<Record<string, string[]>>;
 }
-export declare function defaultServer(id: string): StoredServer;
-export declare function defaultDocument(): SettingsDocument;
-export declare function validateStoredDocument(value: SettingsDocument): void;
-export declare function validateServerId(id: string): void;
-export declare function validateServerConfig(server: StoredServer): void;
-/**
- * Whether a stored value is still an unresolved environment template.
- *
- * A template is legal in `mcp.json` and resolved by the Host immediately before
- * it mounts the server, so shape checks that need the final text (URL parsing)
- * are deferred until then.
- * @param value - the stored value.
- * @returns true when the value carries at least one reference.
+/** Validate the entry document before it is used.
+ * @param value - per-server disabled tool names.
+ * @throws TypeError for a malformed shape, Error for a rejected name.
  */
-export declare function isTemplatedValue(value: string): boolean;
-export declare function validateReconnect(value: ReconnectPolicy): void;
-export declare function transportOf(value: string): ServerTransport;
+export declare function validateDisabledTools(value: Readonly<Record<string, readonly string[]>>): void;
+/** The transport values the panel offers; re-exported here so older imports keep working. */
+export type { ServerTransport };
 //# sourceMappingURL=settings.d.ts.map

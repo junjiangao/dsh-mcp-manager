@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dsh-mcp-manager · 面板静态预览</title>
+    <style>
+      :root {
+        --dsw-alias-bg-base: #ffffff;
+        --dsw-alias-bg-layer-1: #ffffff;
+        --dsw-alias-bg-layer-2: #f7f7f8;
+        --dsw-alias-bg-layer-3: #f0f1f3;
+        --dsw-alias-border-l1: #e4e5e9;
+        --dsw-alias-border-l2: #d3d5db;
+        --dsw-alias-label-primary: #1b1c1f;
+        --dsw-alias-label-secondary: #5b5e66;
+        --dsw-alias-label-tertiary: #8a8d96;
+        --dsw-alias-brand-primary: #4d6bfe;
+        --dsw-alias-bg-brand: #4d6bfe;
+        --dsw-alias-label-on-brand: #ffffff;
+        --dsw-alias-bg-success: #e8f5ec;
+        --dsw-alias-label-success: #1f7a3d;
+        --dsw-alias-bg-warning: #fdf3e3;
+        --dsw-alias-label-warning: #8a5a00;
+        --dsw-alias-bg-danger: #fdecec;
+        --dsw-alias-label-danger: #a11212;
+        --dsw-alias-bg-info: #eaf0ff;
+        --dsw-alias-label-info: #2b4ac0;
+        --dsw-font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        color-scheme: light;
+      }
+      body[data-ds-dark-theme] {
+        --dsw-alias-bg-base: #17181b;
+        --dsw-alias-bg-layer-1: #1e2024;
+        --dsw-alias-bg-layer-2: #24262b;
+        --dsw-alias-bg-layer-3: #2b2e34;
+        --dsw-alias-border-l1: #33363d;
+        --dsw-alias-border-l2: #43474f;
+        --dsw-alias-label-primary: #f2f3f5;
+        --dsw-alias-label-secondary: #b9bdc6;
+        --dsw-alias-label-tertiary: #8b909a;
+        --dsw-alias-brand-primary: #7b93ff;
+        --dsw-alias-bg-brand: #4d6bfe;
+        --dsw-alias-label-on-brand: #ffffff;
+        --dsw-alias-bg-success: #1d3526;
+        --dsw-alias-label-success: #7fd79b;
+        --dsw-alias-bg-warning: #3a2f1a;
+        --dsw-alias-label-warning: #f0c067;
+        --dsw-alias-bg-danger: #3b1f1f;
+        --dsw-alias-label-danger: #f0a0a0;
+        --dsw-alias-bg-info: #1f2a4a;
+        --dsw-alias-label-info: #9db4ff;
+        color-scheme: dark;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family-base); }
+      .preview-shell { max-width: 1180px; margin: 0 auto; padding: 20px 20px 48px; }
+      .preview-bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 14px; margin-bottom: 16px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-bg-layer-2); font-size: 13px; }
+      .preview-bar span { color: var(--dsw-alias-label-secondary); }
+      .preview-bar button { padding: 5px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-1); color: inherit; cursor: pointer; }
+      .preview-panel { padding: 20px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; background: var(--dsw-alias-bg-layer-1); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./entry.tsx"></script>
+  </body>
+</html>

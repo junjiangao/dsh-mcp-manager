@@ -17,9 +17,13 @@
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
-    "types": ["node", "react"]
+    "types": [
+      "node",
+      "react"
+    ]
   },
   "include": [
+    "src/server-config.ts",
     "src/types.ts",
     "src/client/**/*.ts",
     "src/client/**/*.tsx"

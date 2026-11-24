@@ -1,74 +1,61 @@
+/** The shared validator: the same rules a file entry and a panel write must pass. */
+
 import { describe, expect, it } from 'vitest'
-import { Config } from '@deepseek-ai/dsh-mcp-client'
-import { DEFAULT_RECONNECT, defaultServer, validateServerConfig, validateServerId } from '../src/settings.ts'
-import { validateMcpConfig } from '../src/host/mcp-config.ts'
+import {
+  CREDENTIAL_KEY_PATTERN, DEFAULT_RECONNECT, defaultServer, isCredentialTemplate, isTemplatedValue, validateReconnect, validateServerConfig,
+  validateServerId,
+} from '../src/server-config.ts'
 
-function expectMcpConfigValidation(fn: () => unknown): void {
-  let caught: unknown
-  try {
-    fn()
-  } catch (error) {
-    caught = error
-  }
-  expect(caught).toBeInstanceOf(Error)
-  expect((caught as { code?: string }).code).toBe('MCP_CONFIG_VALIDATION')
-}
+describe('server ids', () => {
+  it('accepts the mcp-client namespace alphabet and bounds', () => {
+    expect(() => validateServerId('demo')).not.toThrow()
+    expect(() => validateServerId('a-b_c1')).not.toThrow()
+    expect(() => validateServerId('')).toThrow(/must match/u)
+    expect(() => validateServerId('a'.repeat(33))).toThrow(/must match/u)
+    expect(() => validateServerId('bad id')).toThrow(/must match/u)
+  })
+})
 
-describe('MCP config validation delegated to dsh-mcp-client', () => {
-  it('fills the same reconnect defaults as DEFAULT_RECONNECT', () => {
-    const resolved = Config({ transport: 'stdio', serverName: 'probe', command: 'sh' })
-    expect(resolved.reconnect).toEqual(DEFAULT_RECONNECT)
+describe('server configuration', () => {
+  it('fills the official defaults', () => {
+    const server = defaultServer('demo')
+    expect(server.enabled).toBe(true)
+    expect(server.startupTimeoutMs).toBe(30_000)
+    expect(server.closeTimeoutMs).toBe(5_000)
+    expect(server.toolCallTimeoutMs).toBe(60_000)
+    expect(server.toolLoading).toBe('eager')
+    expect(server.reconnect).toEqual(DEFAULT_RECONNECT)
   })
 
-  it('rejects invalid args types via the Config schema', () => {
-    expectMcpConfigValidation(() => validateMcpConfig({
-      ...defaultServer('x'), command: 'sh', args: [42] as unknown as string[],
-    }))
+  it('requires the fields each transport needs and forbids the other transport', () => {
+    expect(() => validateServerConfig({ ...defaultServer('a'), transport: 'stdio', command: '' })).toThrow(/needs a command/u)
+    expect(() => validateServerConfig({ ...defaultServer('a'), transport: 'streamable-http', url: '' })).toThrow(/needs a URL/u)
+    expect(() => validateServerConfig({ ...defaultServer('a'), transport: 'streamable-http', url: 'ftp://x' })).toThrow(/http or https/u)
+    expect(() => validateServerConfig({ ...defaultServer('a'), transport: 'streamable-http', url: 'https://x', command: 'node' })).toThrow(/must not set a command/u)
+    expect(() => validateServerConfig({ ...defaultServer('a'), command: 'node', env: { '': 'x' } })).toThrow(/empty environment key/u)
   })
 
-  it('rejects invalid reconnect bounds via the Config schema', () => {
-    for (const reconnect of [
-      { ...DEFAULT_RECONNECT, initialDelayMs: 0 },
-      { ...DEFAULT_RECONNECT, maxAttempts: 0 },
-    ]) {
-      expectMcpConfigValidation(() => validateMcpConfig({
-        ...defaultServer('x'), command: 'sh', reconnect,
-      }))
-    }
+  it('validates every timeout bound and reconnect ordering', () => {
+    const base = { ...defaultServer('a'), command: 'node' }
+    expect(() => validateServerConfig({ ...base, toolCallTimeoutMs: 0 })).toThrow(/must be .*integer/u)
+    expect(() => validateServerConfig({ ...base, startupTimeoutMs: 2_147_483_648 })).toThrow(/must be .*integer/u)
+    expect(() => validateReconnect({ ...DEFAULT_RECONNECT, initialDelayMs: 2_000, maxDelayMs: 1_000 })).toThrow(/must be >= initialDelayMs/u)
+    expect(() => validateReconnect({ ...DEFAULT_RECONNECT, maxAttempts: 0 })).toThrow(/must be .*integer/u)
   })
 
-  it('keeps manager validation for the stdio command', () => {
-    expect(() => validateServerConfig(defaultServer('x'))).toThrow(/needs a command/u)
+  it('accepts credential templates only as the whole value and only with the namespace', () => {
+    expect(isCredentialTemplate('${credential:mcp-client/demo}')).toBe(true)
+    expect(isCredentialTemplate('Bearer ${credential:mcp-client/demo}')).toBe(true)
+    expect(isTemplatedValue('${env:TOKEN}')).toBe(true)
+    expect(CREDENTIAL_KEY_PATTERN.test('mcp-client/demo')).toBe(true)
+    expect(CREDENTIAL_KEY_PATTERN.test('mcp-client/a/b')).toBe(false)
+    const base = { ...defaultServer('a'), transport: 'streamable-http' as const, url: 'https://x' }
+    expect(() => validateServerConfig({ ...base, headers: { Authorization: 'Bearer ${credential:mcp-client/demo}' } })).toThrow(/credential/u)
+    expect(() => validateServerConfig({ ...base, oauth: { credentialKey: 'nope', requestTimeoutMs: 1, authorizationTimeoutMs: 2 } })).toThrow(/mcp-client/u)
+    expect(() => validateServerConfig({ ...defaultServer('a'), command: 'node', oauth: { credentialKey: 'mcp-client/a', requestTimeoutMs: 1, authorizationTimeoutMs: 2 } })).toThrow(/streamable-http/u)
   })
 
-  it('keeps manager validation for HTTP-only URLs', () => {
-    const server = { ...defaultServer('x'), transport: 'streamable-http' as const, url: 'ftp://example.com/mcp' }
-    expect(() => validateServerConfig(server)).toThrow(/must use http or https/u)
-  })
-
-  it('keeps manager validation for toolCallTimeoutMs bounds', () => {
-    for (const toolCallTimeoutMs of [0, 2_147_483_648]) {
-      expect(() => validateServerConfig({
-        ...defaultServer('x'), command: 'sh', toolCallTimeoutMs,
-      })).toThrow(/toolCallTimeoutMs/u)
-    }
-  })
-
-  it('accepts ids whose dash is not a descending range (browser-safe pattern)', () => {
-    for (const id of ['codebase-memory', '-leading', 'a_b-c', 'mcp_1', 'X'.repeat(32)]) {
-      expect(() => validateServerId(id)).not.toThrow()
-    }
-    for (const id of ['', 'has space', '中文', 'X'.repeat(33)]) {
-      expect(() => validateServerId(id)).toThrow()
-    }
-  })
-
-  it('rejects malformed sensitive-key lists and accepts orphan markers', () => {
-    const server = { ...defaultServer('x'), command: 'sh' }
-    expect(() => validateServerConfig(server)).not.toThrow()
-    expect(() => validateServerConfig({ ...server, envSensitive: ['TOKEN'] })).not.toThrow()
-    expect(() => validateServerConfig({ ...server, envSensitive: ['TOKEN', 'TOKEN'] })).toThrow(/duplicate key/u)
-    expect(() => validateServerConfig({ ...server, envSensitive: [''] })).toThrow(/invalid envSensitive key/u)
-    expect(() => validateServerConfig({ ...server, headerSensitive: ['x'.repeat(257)] })).toThrow(/invalid headerSensitive key/u)
+  it('accepts an orphan sensitive marker, because the official client allows it', () => {
+    expect(() => validateServerConfig({ ...defaultServer('a'), command: 'node', envSensitive: ['GONE'] })).not.toThrow()
   })
 })

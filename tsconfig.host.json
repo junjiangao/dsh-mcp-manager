@@ -17,10 +17,13 @@
     "resolveJsonModule": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
   "include": [
     "src/index.ts",
+    "src/server-config.ts",
     "src/types.ts",
     "src/settings.ts",
     "src/protocol.ts",

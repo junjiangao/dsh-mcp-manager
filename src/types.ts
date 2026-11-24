@@ -26,24 +26,35 @@ export const MCP_MANAGER_ENDPOINT_PREFIX = 'mcp-manager' as const
 /**
  * Every manager endpoint, in registration order.
  *
- * These cover the `mcp.json` scopes and runtime status only. The legacy
- * Loader-entry scope is absent on purpose: it is a plugin's own configuration,
- * so the browser edits it through the official shared settings form
- * (`ctx.configForms`) rather than through a private protocol.
+ * The `mcp.json` file scopes are written through this private protocol because
+ * no shared service owns those files. Everything the official MCP manager
+ * already governs is **not** mirrored here: live status and restart/probe go
+ * through `ctx.remote.mcpManager`, configuration of the official
+ * `mcp-manager` entry goes through the shared settings form
+ * (`ctx.configForms`), and the per-tool policy of this plugin goes through its
+ * own entry form. The three authorization endpoints exist because the official
+ * manager exposes `startAuthorization` / `cancelAuthorization` / `signOut` on
+ * the Host only; they name a server the manager already lists and add no write
+ * path of their own.
  */
 export const MCP_MANAGER_ENDPOINTS = [
   'snapshot',
   'upsertServer',
   'removeServer',
   'setServerEnabled',
-  'reloadServer',
+  'authorize',
+  'cancelAuthorization',
+  'signOut',
 ] as const
 
+/** The Loader entry id this plugin's Host half is mounted under, and its settings namespace. */
+export const MCP_MANAGER_NAMESPACE = 'dsh-mcp-manager' as const
+
 /**
- * The Loader entry id this plugin's Host half is mounted under, which is also
- * its settings namespace. It is the key `ctx.configForms.get()` takes.
+ * The official MCP manager's Loader entry id in the `dsh-web-app` composition.
+ * It is the settings namespace the panel writes `servers` through.
  */
-export const MCP_MANAGER_NAMESPACE = 'web-mcp-manager' as const
+export const MCP_UPSTREAM_NAMESPACE = 'mcp-manager' as const
 
 export type ManagerRpcEndpoint = typeof MCP_MANAGER_ENDPOINTS[number]
 
@@ -61,14 +72,10 @@ export function mcpManagerRoutePath(endpoint: ManagerRpcEndpoint): string {
 }
 
 export type ServerTransport = 'stdio' | 'streamable-http'
-export type ServerStatus = 'disabled' | 'waiting' | 'loading' | 'loaded' | 'failed'
+export type ToolLoading = 'eager' | 'on-demand'
 
-/**
- * Every place a server definition can come from, in precedence order: a later
- * entry never overrides an earlier one. `entry` is the legacy Loader-entry
- * store the plugin used before `mcp.json` support.
- */
-export const MCP_SCOPES = ['project', 'profile', 'user', 'entry'] as const
+/** Every `mcp.json` scope this plugin owns, in precedence order. */
+export const MCP_SCOPES = ['project', 'profile', 'user'] as const
 export type McpScope = typeof MCP_SCOPES[number]
 
 export interface ReconnectPolicy {
@@ -78,11 +85,25 @@ export interface ReconnectPolicy {
   maxAttempts: number
 }
 
+/** OAuth settings carried by one server entry; the credential value itself never appears here. */
+export interface OAuthPolicy {
+  /** `mcp-client/<id>`; the credential store reference, never the token. */
+  credentialKey: string
+  clientId?: string
+  scope?: string
+  requestTimeoutMs: number
+  authorizationTimeoutMs: number
+}
+
 /** Secret values never cross the RPC boundary; only this state does. */
 export interface SecretState {
   readonly set: boolean
   /** Whether the stored value should be masked in the panel (sensitive key). */
   readonly sensitive: boolean
+  /** Whether the value is an environment template (`${env:NAME}`) rather than a literal. */
+  readonly template: boolean
+  /** Whether the value is a credential template (`${credential:REF}`) resolved by the official client. */
+  readonly credential: boolean
 }
 
 /** One `mcp.json` source row as the panel renders it. */
@@ -106,10 +127,12 @@ export interface WorkspaceView {
   readonly title: string
 }
 
-/** Environment variables one stored server keeps as `${…}` templates. */
+/** Environment/credential variables one stored server keeps as templates. */
 export interface ServerTemplates {
   readonly env: readonly string[]
   readonly headers: readonly string[]
+  /** Values that reference the official credential store (`${credential:…}`). */
+  readonly credentials: readonly string[]
 }
 
 export interface ManagedServerView {
@@ -124,16 +147,29 @@ export interface ManagedServerView {
   readonly env: Readonly<Record<string, SecretState>>
   readonly headers: Readonly<Record<string, SecretState>>
   readonly toolCallTimeoutMs: number
+  readonly startupTimeoutMs: number
+  readonly closeTimeoutMs: number
   readonly reconnect: ReconnectPolicy
-  readonly status: ServerStatus
-  readonly error?: string
-  readonly toolCount: number
-  /** The scope whose definition won. */
+  readonly toolLoading: ToolLoading
+  readonly oauth?: OAuthPolicy
+  /** The scope whose definition won, and the file that definition lives in. */
   readonly scope: McpScope
+  readonly path: string
+  /** Whether the winning definition's file is writable by this Host. */
+  readonly writable: boolean
   /** Lower-precedence definitions of the same name that lost. */
   readonly shadowed: readonly McpScope[]
-  /** Values this server keeps as environment templates rather than literals. */
+  /** Values this server keeps as templates rather than literals. */
   readonly templates: ServerTemplates
+  /** Whether the Host registered this server with the official MCP manager. */
+  readonly registration: RegistrationView
+}
+
+/** Outcome of projecting one file server into the official manager's registration. */
+export interface RegistrationView {
+  readonly state: 'registered' | 'disabled' | 'missing-env' | 'invalid' | 'conflict' | 'error'
+  readonly error?: string
+  readonly missing?: readonly string[]
 }
 
 export interface ManagedToolView {
@@ -144,23 +180,11 @@ export interface ManagedToolView {
   readonly enabled: boolean
 }
 
-export interface ReadonlyMcpEntry {
-  readonly entryId: string
-  readonly moduleName: string
-  readonly source: 'loader' | 'preset'
-  readonly sourceId?: string
-  readonly sourceName?: string
-  readonly enabled: boolean | 'conditional'
-  readonly condition?: string
-  readonly fiberPhase: 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | null
-}
-
 export interface Snapshot {
   readonly writable: boolean
   readonly servers: readonly ManagedServerView[]
   readonly tools: readonly ManagedToolView[]
-  readonly readonlyEntries: readonly ReadonlyMcpEntry[]
-  /** Every `mcp.json` source row plus the legacy entry row. */
+  /** Every `mcp.json` source row. */
   readonly sources: readonly McpSourceView[]
   /** Registered workspaces the project scope may be rooted at. */
   readonly workspaces: readonly WorkspaceView[]
@@ -195,15 +219,19 @@ export interface ServerPatch {
   /** Keys of `headers` whose values must be masked in the panel (full list semantics). */
   readonly headerSensitive?: readonly string[]
   readonly toolCallTimeoutMs?: number
+  readonly startupTimeoutMs?: number
+  readonly closeTimeoutMs?: number
   readonly reconnect?: Partial<ReconnectPolicy>
+  readonly toolLoading?: ToolLoading
+  /** `null` removes the policy; an object replaces it. */
+  readonly oauth?: OAuthPolicy | null
 }
 
 /**
  * Where a write lands.
  *
  * A `project` scope is only accepted when `projectPath` names a registered
- * workspace root; the Host never writes outside a root it can prove. An `entry`
- * target is refused: see {@link MCP_MANAGER_ENDPOINTS}.
+ * workspace root; the Host never writes outside a root it can prove.
  */
 export interface ScopeTarget {
   readonly scope?: McpScope
@@ -225,8 +253,26 @@ export interface SetServerEnabledRequest extends ScopeTarget {
   readonly enabled: boolean
 }
 
-export interface ReloadServerRequest {
+export interface AuthorizeRequest {
+  readonly name: string
+}
+
+export interface CancelAuthorizationRequest {
+  readonly name: string
+  /** Identity the manager issued for the attempt being cancelled. */
   readonly id: string
+}
+
+export interface SignOutRequest {
+  readonly name: string
+}
+
+/** Result of the authorization endpoints: the manager's attempt view, without any credential material. */
+export interface AuthorizationResult {
+  readonly id: string
+  readonly phase: 'starting' | 'waiting-browser' | 'exchanging' | 'committing' | 'authorized' | 'cancelled' | 'failed'
+  readonly authorizationUrl?: string
+  readonly lastError?: string
 }
 
 export interface RpcError {
@@ -235,6 +281,7 @@ export interface RpcError {
   | 'not-found'
   | 'not-writable'
   | 'validation'
+  | 'conflict'
   | 'internal'
   | 'aborted'
   readonly message: string
@@ -244,13 +291,6 @@ export interface RpcError {
 export type RpcResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: RpcError }
-
-export interface StoredReconnectPolicy {
-  enabled: boolean
-  initialDelayMs: number
-  maxDelayMs: number
-  maxAttempts: number
-}
 
 /** Actual Host-only stored shape. Secret values are kept here and nowhere in a view. */
 export interface StoredServer {
@@ -269,12 +309,11 @@ export interface StoredServer {
   /** Keys of `headers` whose values are masked in the panel (full list, persisted). */
   headerSensitive: string[]
   toolCallTimeoutMs: number
-  reconnect: StoredReconnectPolicy
-}
-
-export interface SettingsDocument {
-  servers: Record<string, StoredServer>
-  disabledTools: Record<string, string[]>
+  startupTimeoutMs: number
+  closeTimeoutMs: number
+  reconnect: ReconnectPolicy
+  toolLoading: ToolLoading
+  oauth?: OAuthPolicy
 }
 
 export interface StoredServerPatch {
@@ -291,7 +330,11 @@ export interface StoredServerPatch {
   readonly envSensitive?: readonly string[]
   readonly headerSensitive?: readonly string[]
   readonly toolCallTimeoutMs?: number
-  readonly reconnect?: Partial<StoredReconnectPolicy>
+  readonly startupTimeoutMs?: number
+  readonly closeTimeoutMs?: number
+  readonly reconnect?: Partial<ReconnectPolicy>
+  readonly toolLoading?: ToolLoading
+  readonly oauth?: OAuthPolicy | null
 }
 
 export function isRpcResult<T>(value: unknown): value is RpcResult<T> {
@@ -304,8 +347,6 @@ export function isRpcResult<T>(value: unknown): value is RpcResult<T> {
 }
 
 /** 插件的社区注册身份(GitHub owner/repo)。 */
-export const PLUGIN_IDENTITY = 'junjiangao/dsh-web-mcp-manager' as const
+export const PLUGIN_IDENTITY = 'junjiangao/dsh-mcp-manager' as const
 /** 插件安装后的 npm 包名 / loader 模块名(bundle 层与 patch 条目 name)。 */
-export const PLUGIN_MODULE_NAME = '@junjiangao/dsh-web-mcp-manager' as const
-/** 旧包名,仅用于已安装 profile 的过渡期识别(只读条目过滤),勿在生产路径使用。 */
-export const LEGACY_PLUGIN_MODULE_NAME = 'dsh-web-mcp-manager' as const
+export const PLUGIN_MODULE_NAME = '@junjiangao/dsh-mcp-manager' as const

@@ -3,25 +3,19 @@
  * Reject a peer declaration the running DSH runtime would call incompatible.
  *
  * `dsh` gates every profile plugin before the Loader imports it: a plugin whose
- * `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` peer requirement the running
- * runtime does not satisfy is loaded **disabled**, with a
- * `dsh plugin allow-version` remedy. That check is
- * `evaluatePluginCompatibility` in `@deepseek-ai/dsh-app-boot`
- * (`lib/index.js`), whose whole verdict reduces to:
+ * `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` requirement the running runtime
+ * does not satisfy is loaded **disabled**, with a `dsh plugin allow-version`
+ * remedy. `evaluatePluginCompatibility` in `@deepseek-ai/dsh-app-boot`
+ * (`lib/index.js:7988`) decides in two steps:
  *
- * ```js
- * if (name !== '@deepseek-ai/dsh' && !name.startsWith('@deepseek-ai/dsh-')) continue
- * if (requirement.trim() === '' ||
- *     !semver.satisfies(runtimeVersion, requirement, { includePrerelease: true }))
- *   peers[name] = range
- * ```
+ * 1. When the plugin declares `engines.dsh`, that range alone decides; every
+ *    peer warning is suppressed.
+ * 2. Otherwise all `@deepseek-ai/dsh*` peers must satisfy the runtime.
  *
- * This script reproduces that predicate so the failure shows up in CI instead
- * of on a user's next `dsh` upgrade. It deliberately does not depend on
- * `dsh-app-boot` (which pulls a native addon and its own peer tree); the
- * predicate above is the entire contract and `includePrerelease: true` is the
- * load-bearing detail — without it `^0.2.0-rc.1` would reject
- * `0.2.1-alpha.1`.
+ * `includePrerelease: true` is load-bearing — without it `^0.2.0-rc.1` would
+ * reject `0.2.1-alpha.1`. This script reproduces that predicate so a bad
+ * manifest fails in CI instead of on a user's next `dsh` upgrade. It does not
+ * depend on `dsh-app-boot` (which pulls a native addon and its own peer tree).
  *
  * Usage:
  *   node scripts/check-dsh-compat.mjs                 # installed dsh version
@@ -74,19 +68,30 @@ for (const [name, range] of Object.entries(manifest.peerDependencies ?? {})) {
 }
 
 const enginesDsh = manifest.engines?.dsh
-const enginesSatisfied = typeof enginesDsh !== 'string'
-  || semver.satisfies(runtimeVersion, enginesDsh, { includePrerelease: true })
+if (typeof enginesDsh === 'string' && enginesDsh.trim() !== '') {
+  if (semver.satisfies(runtimeVersion, enginesDsh, { includePrerelease: true })) {
+    console.log(`check:compat ok — ${manifest.name}@${manifest.version} accepts dsh ${runtimeVersion} (engines.dsh ${enginesDsh})`)
+    process.exit(0)
+  }
+  console.error(
+    `Plugin ${manifest.name}@${manifest.version} is incompatible with dsh ${runtimeVersion}:`
+    + ` engines.dsh ${JSON.stringify(enginesDsh)}`,
+  )
+  console.error(
+    'Running it may cause crashes or data loss. Update the plugin, or widen engines.dsh'
+    + ' deliberately — an incompatible engine leaves the Loader row disabled on the next dsh start.',
+  )
+  process.exit(1)
+}
 
-if (Object.keys(incompatiblePeers).length === 0 && enginesSatisfied) {
-  const engineNote = typeof enginesDsh === 'string' ? `, engines.dsh ${enginesDsh}` : ''
-  console.log(`check:compat ok — ${manifest.name}@${manifest.version} accepts dsh ${runtimeVersion}${engineNote}`)
+if (Object.keys(incompatiblePeers).length === 0) {
+  console.log(`check:compat ok — ${manifest.name}@${manifest.version} accepts dsh ${runtimeVersion} (no engines.dsh, every dsh peer satisfied)`)
   process.exit(0)
 }
 
 console.error(
   `Plugin ${manifest.name}@${manifest.version} is incompatible with dsh ${runtimeVersion}:`
-  + ` peerDependencies ${JSON.stringify(incompatiblePeers)}`
-  + (enginesSatisfied ? '' : `, engines.dsh ${JSON.stringify(enginesDsh)}`),
+  + ` peerDependencies ${JSON.stringify(incompatiblePeers)}`,
 )
 console.error(
   'Running it may cause crashes or data loss. Update the plugin, or widen the requirement'

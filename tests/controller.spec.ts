@@ -1,248 +1,215 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+/** The Host controller: file scopes, registration, tools, and the OAuth RPC. */
+
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SettingsDocument } from '../src/types.ts'
-import { defaultDocument, defaultServer } from '../src/settings.ts'
+import { afterEach, describe, expect, it } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
 import { McpManagerController } from '../src/host/controller.ts'
+import { Config } from '../src/settings.ts'
+import type { ManagerSettings } from '../src/settings.ts'
+import type { Snapshot } from '../src/types.ts'
 
-let document: SettingsDocument = defaultDocument()
-
-/**
- * The harness home is redirected before any controller resolves a path, so the
- * manager's `mcp.json` scopes land in a throwaway tree and never touch the
- * developer's real `~/.dsh`.
- */
-const home = mkdtempSync(join(tmpdir(), 'mcp-manager-home-'))
-process.env.DSH_HOME = home
-const profileDir = join(home, 'profiles', 'test')
-const profileFile = join(profileDir, 'mcp.json')
-
-/** The entry config as the Host resolves it: two volatile refs over the document. */
-const config = {
-  servers: { get: () => document.servers },
-  disabledTools: { get: () => document.disabledTools },
-}
-
-const controllers: McpManagerController[] = []
-
-const ctx = {
-  settings: {
-    // The RPC no longer reads or writes the entry document at all: that layer
-    // belongs to the official shared settings form. `replace` stays mocked so a
-    // stray call would be visible rather than fatal.
-    replace: vi.fn(async (_ns: string, next: SettingsDocument) => { document = next }),
-    writable: true,
-    documentPath: join(profileDir, 'cordis.patch.yml'),
-  },
-  connection: { fetch: { register: vi.fn(() => () => {}) } },
-  effect: vi.fn((execute: () => unknown) => {
-    const disposer = execute()
-    return async () => {
-      if (typeof disposer === 'function') await (disposer as () => void | Promise<void>)()
-    }
-  }),
-  tools: {
-    guard: vi.fn(() => () => {}),
-    schemas: vi.fn(() => []),
-    restrict: vi.fn(() => () => {}),
-    get: vi.fn(() => undefined),
-  },
-  plugin: vi.fn(() => ({ await: Promise.resolve(), dispose: vi.fn(async () => {}) })),
-  logger: { warn: vi.fn() },
-  on: vi.fn(() => () => {}),
-  get: vi.fn(() => undefined),
-} as never
-
-const signal = () => new AbortController().signal
-
-/** Start a controller and register it for disposal at the end of the test. */
-async function mount(): Promise<McpManagerController> {
-  const controller = new McpManagerController(ctx as never, config as never)
-  controllers.push(controller)
-  await controller.start()
-  return controller
-}
-
-beforeEach(() => {
-  document = defaultDocument()
-  rmSync(profileDir, { recursive: true, force: true })
-  mkdirSync(profileDir, { recursive: true })
-  rmSync(join(home, 'mcp.json'), { force: true })
-  ;(ctx as never as { settings: { documentPath?: string } }).settings.documentPath = join(profileDir, 'cordis.patch.yml')
-  // `clearAllMocks` clears calls but keeps implementations, so a test that left
-  // a never-settling fiber behind would stall the next test's `start()`.
-  ;(ctx as never as { plugin: ReturnType<typeof vi.fn> }).plugin
-    .mockReturnValue({ await: Promise.resolve(), dispose: vi.fn(async () => {}) })
-})
-
+const roots: string[] = []
+const originalHome = process.env.DSH_HOME
 afterEach(async () => {
-  // Restore real timers first: a failed fake-timer test must not make the
-  // disposal below (or the next test's file locks) wait on a clock nobody advances.
-  vi.useRealTimers()
-  for (const controller of controllers.splice(0)) await controller.dispose()
-  vi.clearAllMocks()
+  if (originalHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = originalHome
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })
 
-/** Poll the snapshot until one server satisfies the predicate, or give up. */
-async function waitForServer(
-  controller: McpManagerController,
-  predicate: (server: import('../src/types.ts').ManagedServerView) => boolean,
-): Promise<import('../src/types.ts').ManagedServerView | undefined> {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    const snap = await controller.handle('snapshot', {}, signal())
-    if (snap.ok) {
-      const match = snap.value.servers.find(predicate)
-      if (match !== undefined) return match
-    }
-    await new Promise(resolve => setTimeout(resolve, 5))
-  }
-  return undefined
+async function profileDir(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-mcp-'))
+  roots.push(root)
+  const profile = join(root, 'profiles', 'desktop')
+  await rm(profile, { recursive: true, force: true })
+  return profile
 }
 
-describe('McpManagerController', () => {
-  it('refuses to write the legacy entry scope through the RPC', async () => {
-    const controller = await mount()
-    const result = await controller.handle('upsertServer', { scope: 'entry', server: { id: 'x', command: 'node' } }, signal())
-    expect(result.ok).toBe(false)
-    // The entry document's only writer is the official shared settings form,
-    // which fences the change with its own revision; this channel would be a
-    // second, unfenced path to the same document.
-    if (!result.ok) {
-      expect(result.error.code).toBe('bad-request')
-      expect(result.error.message).toContain('settings form')
-    }
-    expect((ctx as never as { settings: { replace: ReturnType<typeof vi.fn> } }).settings.replace).not.toHaveBeenCalled()
-  })
+interface Harness {
+  readonly controller: McpManagerController
+  readonly settings: Snapshot
+  readonly registered: Map<string, () => void>
+  readonly calls: string[]
+  readonly guard: (execution: { readonly name: string }) => string | undefined
+}
 
-  it('refuses to remove or disable a server whose definition lives at entry scope', async () => {
-    document = { servers: { legacy: { ...defaultServer('legacy'), command: 'node' } }, disabledTools: {} }
-    const controller = await mount()
-    for (const request of [
-      { endpoint: 'removeServer', payload: { id: 'legacy' } },
-      { endpoint: 'setServerEnabled', payload: { id: 'legacy', enabled: false } },
-    ]) {
-      const result = await controller.handle(request.endpoint, request.payload, signal())
-      expect(result.ok).toBe(false)
-      if (!result.ok) expect(result.error.code).toBe('bad-request')
-    }
-    // The definition is untouched: the panel migrates or removes it through
-    // the form, not here.
-    expect(document.servers.legacy).toBeDefined()
-  })
+async function harness(options: { readonly disabledTools?: Record<string, string[]>; readonly projectRoot?: string } = {}): Promise<Harness> {
+  const profile = await profileDir()
+  process.env.DSH_HOME = join(profile, '..', '..', 'home')
+  const registered = new Map<string, () => void>()
+  const calls: string[] = []
+  let guard: (execution: { readonly name: string }) => string | undefined = () => undefined
+  const manager = {
+    list: () => [...registered.keys()].map(name => ({ name, configured: false })),
+    register: (name: string) => {
+      calls.push(name)
+      const dispose = (): void => { registered.delete(name) }
+      registered.set(name, dispose)
+      return dispose
+    },
+    startAuthorization: async () => ({ id: 'attempt-1', phase: 'waiting-browser' as const, authorizationUrl: 'https://auth.test' }),
+    cancelAuthorization: async () => {},
+    signOut: async () => {},
+  }
+  const settings = {
+    documentPath: join(profile, 'settings.yml'),
+    writable: true,
+    configure: () => () => {},
+  }
+  const tools = {
+    schemas: () => [
+      { name: 'mcp__demo__read', description: 'read', parameters: {} },
+      { name: 'mcp__other__x', description: 'other', parameters: {} },
+      { name: 'read_file', description: 'builtin', parameters: {} },
+    ],
+    guard: (fn: typeof guard) => { guard = fn; return () => {} },
+    get: () => ({}),
+    restrict: () => () => {},
+  }
+  const workspace = options.projectRoot === undefined ? undefined : { id: 1, path: options.projectRoot, title: 'Project' }
+  const ctx = {
+    settings,
+    tools,
+    mcpManager: manager,
+    logger: { warn: () => {}, info: () => {}, error: () => {} },
+    get: (name: string) => name === 'workspaceRegistry' && workspace !== undefined ? { list: () => [workspace] } : undefined,
+    on: () => () => {},
+    effect: (factory: () => unknown) => {
+      const dispose = factory()
+      return async (): Promise<void> => {
+        if (typeof dispose === 'function') await (dispose as () => unknown)()
+      }
+    },
+    connection: { fetch: { register: () => async () => {} } },
+  } as unknown as Context
+  const config = Config({ disabledTools: options.disabledTools ?? {} }) as unknown as ManagerSettings
+  const controller = new McpManagerController(ctx, config, () => ({}))
+  await controller.start()
+  return {
+    controller,
+    settings: await controller.handle('snapshot', {}, new AbortController().signal).then(result => {
+      if (!result.ok) throw new Error(result.error.message)
+      return result.value as Snapshot
+    }),
+    registered,
+    calls,
+    guard: execution => guard(execution),
+  }
+}
 
-  it('has no endpoint for the per-tool policy: that document is the form\'s', async () => {
-    const controller = await mount()
-    const result = await controller.handle('setToolEnabled', { serverId: 'x', name: 'mcp__x__one', enabled: false }, signal())
-    expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.error.message).toContain('unknown MCP manager endpoint')
-  })
+async function snapshot(h: Harness, payload: Record<string, unknown> = {}): Promise<Snapshot> {
+  const result = await h.controller.handle('snapshot', payload, new AbortController().signal)
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  return result.value as Snapshot
+}
 
-  it('writes a new server into the profile mcp.json scope', async () => {
-    const controller = await mount()
-    const result = await controller.handle('upsertServer', { server: { id: 'x', command: 'node' } }, signal())
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.value.servers.map(server => [server.id, server.scope])).toEqual([['x', 'profile']])
-    expect(result.value.sources.find(source => source.scope === 'profile')?.serverCount).toBe(1)
-    // A file-scope write carries no revision fence: the file is re-read inside
-    // the cross-process lock instead, and the entry document is never touched.
-    expect((ctx as never as { settings: { replace: ReturnType<typeof vi.fn> } }).settings.replace).not.toHaveBeenCalled()
-  })
-
-  it('does not block the write on lifecycle startup', async () => {
-    let resolveAwait!: () => void
-    ;(ctx as never as { plugin: ReturnType<typeof vi.fn> }).plugin.mockReturnValue({
-      await: vi.fn(() => new Promise<void>(resolve => { resolveAwait = resolve })),
-      dispose: vi.fn(async () => {}),
-    })
-    const controller = await mount()
-    const result = await controller.handle('upsertServer', { server: { id: 'x', command: 'node' } }, signal())
-    expect(result.ok).toBe(true)
-    // reconcile 已入队(后台挂起),但写操作已返回
-    await vi.waitFor(() => expect((ctx as never as { plugin: ReturnType<typeof vi.fn> }).plugin).toHaveBeenCalled())
-    resolveAwait()
-    await Promise.resolve()
-  })
-
-  it('does not let a slow server block writes to another server', async () => {
-    let resolveA!: () => void
-    const hang = new Promise<void>(resolve => { resolveA = resolve })
-    ;(ctx as never as { plugin: ReturnType<typeof vi.fn> }).plugin.mockReturnValue({
-      await: vi.fn(() => hang),
-      dispose: vi.fn(async () => {}),
-    })
-    const controller = await mount()
-    const first = await controller.handle('upsertServer', { server: { id: 'a', command: 'node' } }, signal())
-    expect(first.ok).toBe(true)
-    const second = await controller.handle('upsertServer', { server: { id: 'b', command: 'node' } }, signal())
-    expect(second.ok).toBe(true)
-    resolveA()
-    await Promise.resolve()
-  })
-
-  it('marks startup as failed when it times out', async () => {
-    // Capture a real yield before the clock is faked: the reconciler reads the
-    // scope files through real I/O, so advancing a fake clock only helps once
-    // that I/O has actually settled and the startup bound exists.
-    const realSetImmediate = setImmediate
-    vi.useFakeTimers()
-    const plugin = (ctx as never as { plugin: ReturnType<typeof vi.fn> }).plugin
-    plugin.mockReturnValue({
-      await: vi.fn(() => new Promise<void>(() => {})),
-      dispose: vi.fn(async () => {}),
-    })
-    const controller = await mount()
-    const result = await controller.handle('upsertServer', { server: { id: 'x', command: 'node' } }, signal())
-    expect(result.ok).toBe(true)
-    for (let turn = 0; turn < 500 && plugin.mock.calls.length === 0; turn++) {
-      await new Promise(resolve => realSetImmediate(resolve))
-    }
-    expect(plugin).toHaveBeenCalled()
-    await vi.advanceTimersByTimeAsync(30_000)
-    const snap = await controller.handle('snapshot', {}, signal())
-    expect(snap.ok).toBe(true)
-    if (snap.ok) {
-      expect(snap.value.servers[0]?.status).toBe('failed')
-      expect(snap.value.servers[0]?.error).toContain('timed out')
-    }
-  })
-
-  it('surfaces a template that has no environment value as a named failure', async () => {
-    const controller = await mount()
-    await controller.handle('upsertServer', {
-      server: { id: 'templated', command: 'node', env: { TOKEN: '${env:DSH_MCP_TEST_MISSING}' } }
-    }, signal())
-    const failed = await waitForServer(controller, server => server.error !== undefined)
-    expect(failed?.error).toContain('DSH_MCP_TEST_MISSING')
-    // The template never leaves the Host: the panel still sees the reference.
-    expect(failed?.templates.env).toEqual(['TOKEN'])
-    expect(failed?.env.TOKEN).toEqual({ set: true, sensitive: false })
-  })
-
-  it('keeps a legacy entry server readable and migratable into a file scope', async () => {
-    document = { servers: { legacy: { ...defaultServer('legacy'), command: 'node' } }, disabledTools: {} }
-    const controller = await mount()
-    const before = await controller.handle('snapshot', {}, signal())
-    expect(before.ok).toBe(true)
-    if (before.ok) expect(before.value.servers[0]?.scope).toBe('entry')
-
-    const migrated = await controller.handle('upsertServer', {
+describe('file scope writes', () => {
+  it('creates, disables, and removes a profile server through the RPC', async () => {
+    const h = await harness()
+    const created = await h.controller.handle('upsertServer', {
       scope: 'profile',
-      server: { id: 'legacy', command: 'node' }
-    }, signal())
-    expect(migrated.ok).toBe(true)
-    if (migrated.ok) {
-      expect(migrated.value.servers[0]?.scope).toBe('profile')
-      expect(migrated.value.servers[0]?.shadowed).toEqual(['entry'])
-    }
+      server: { id: 'demo', transport: 'stdio', command: 'node', env: { A: '1' } },
+    }, new AbortController().signal)
+    expect(created.ok).toBe(true)
+    expect(h.registered.has('demo')).toBe(true)
+    expect((await snapshot(h)).servers[0]?.registration).toEqual({ state: 'registered' })
+
+    await h.controller.handle('setServerEnabled', { id: 'demo', enabled: false }, new AbortController().signal)
+    expect(h.registered.has('demo')).toBe(false)
+    expect((await snapshot(h)).servers[0]?.enabled).toBe(false)
+
+    await h.controller.handle('removeServer', { id: 'demo' }, new AbortController().signal)
+    expect((await snapshot(h)).servers).toEqual([])
   })
 
-  it('degrades to the user scope when this deployment has no profile directory', async () => {
-    ;(ctx as never as { settings: { documentPath?: string } }).settings.documentPath = undefined
-    const controller = await mount()
-    const result = await controller.handle('upsertServer', { server: { id: 'x', command: 'node' } }, signal())
+  it('rejects a project path the workspace registry does not own', async () => {
+    const h = await harness({ projectRoot: '/tmp/workspace' })
+    const result = await h.controller.handle('upsertServer', {
+      scope: 'project',
+      projectPath: '/tmp/other',
+      server: { id: 'demo', transport: 'stdio', command: 'node' },
+    }, new AbortController().signal)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('validation')
+  })
+
+  it('writes inside the selected workspace and echoes the project path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-ws-'))
+    roots.push(root)
+    const h = await harness({ projectRoot: root })
+    const result = await h.controller.handle('upsertServer', {
+      scope: 'project',
+      projectPath: root,
+      server: { id: 'demo', transport: 'stdio', command: 'node' },
+    }, new AbortController().signal)
     expect(result.ok).toBe(true)
-    if (result.ok) expect(result.value.servers[0]?.scope).toBe('user')
+    const document = JSON.parse(await readFile(join(root, '.dsh', 'mcp.json'), 'utf8')) as { mcpServers: Record<string, unknown> }
+    expect(Object.keys(document.mcpServers)).toEqual(['demo'])
+    expect((await snapshot(h, { projectPath: root })).projectPath).toBe(root)
+  })
+
+  it('refuses to edit a server defined by the read-only compatibility file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-ws-'))
+    roots.push(root)
+    await writeFile(join(root, '.mcp.json'), JSON.stringify({ mcpServers: { compat: { command: 'node' } } }))
+    const h = await harness({ projectRoot: root })
+    const view = (await snapshot(h, { projectPath: root })).servers[0]
+    expect(view?.writable).toBe(false)
+    const result = await h.controller.handle('removeServer', { id: 'compat', projectPath: root }, new AbortController().signal)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('not-writable')
+  })
+})
+
+describe('tools', () => {
+  it('projects MCP tools with their server and disable state', async () => {
+    const h = await harness({ disabledTools: { demo: ['mcp__demo__read'] } })
+    const view = await snapshot(h)
+    expect(view.tools.map(tool => tool.name)).toEqual(['mcp__demo__read', 'mcp__other__x'])
+    expect(view.tools[0]).toMatchObject({ serverId: 'demo', enabled: false })
+    expect(h.guard({ name: 'mcp__demo__read' })).toMatch(/disabled/u)
+    expect(h.guard({ name: 'read_file' })).toBeUndefined()
+  })
+
+  it('reports the workspace directory as the panel sees it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-ws-'))
+    roots.push(root)
+    const h = await harness({ projectRoot: root })
+    expect((await snapshot(h)).workspaces).toEqual([{ id: '1', path: root, title: 'Project' }])
+  })
+})
+
+describe('OAuth operations', () => {
+  it('starts, cancels, and signs out only for a managed server', async () => {
+    const h = await harness()
+    const unknown = await h.controller.handle('authorize', { name: 'ghost' }, new AbortController().signal)
+    expect(unknown.ok).toBe(false)
+    if (!unknown.ok) expect(unknown.error.code).toBe('not-found')
+
+    await h.controller.handle('upsertServer', {
+      scope: 'profile',
+      server: {
+        id: 'remote', transport: 'streamable-http', url: 'https://x.test/mcp',
+        oauth: { credentialKey: 'mcp-client/remote', requestTimeoutMs: 1_000, authorizationTimeoutMs: 2_000 },
+      },
+    }, new AbortController().signal)
+    const started = await h.controller.handle('authorize', { name: 'remote' }, new AbortController().signal)
+    expect(started.ok).toBe(true)
+    if (started.ok) expect(started.value).toMatchObject({ phase: 'waiting-browser', authorizationUrl: 'https://auth.test' })
+    expect((await h.controller.handle('cancelAuthorization', { name: 'remote', id: 'attempt-1' }, new AbortController().signal)).ok).toBe(true)
+    expect((await h.controller.handle('signOut', { name: 'remote' }, new AbortController().signal)).ok).toBe(true)
+  })
+})
+
+describe('disposal', () => {
+  it('withdraws every registration and refuses later calls', async () => {
+    const h = await harness()
+    await h.controller.handle('upsertServer', { scope: 'profile', server: { id: 'demo', transport: 'stdio', command: 'node' } }, new AbortController().signal)
+    expect(h.registered.has('demo')).toBe(true)
+    await h.controller.dispose()
+    expect(h.registered.size).toBe(0)
+    const late = await h.controller.handle('snapshot', {}, new AbortController().signal)
+    expect(late.ok).toBe(false)
   })
 })

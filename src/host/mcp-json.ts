@@ -13,9 +13,10 @@
  */
 
 import {
-  DEFAULT_RECONNECT, DEFAULT_TOOL_CALL_TIMEOUT_MS, defaultServer, validateServerId,
-} from '../settings.ts'
-import type { StoredServer } from '../types.ts'
+  DEFAULT_CLOSE_TIMEOUT_MS, DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_REQUEST_TIMEOUT_MS, DEFAULT_RECONNECT,
+  DEFAULT_STARTUP_TIMEOUT_MS, DEFAULT_TOOL_CALL_TIMEOUT_MS, defaultServer, isToolLoading, validateServerConfig, validateServerId,
+} from '../server-config.ts'
+import type { OAuthPolicy, ReconnectPolicy, StoredServer } from '../types.ts'
 
 /** Primary top-level key holding the server map. */
 export const MCP_SERVERS_KEY = 'mcpServers' as const
@@ -25,8 +26,8 @@ export const MCP_SERVERS_ALIAS_KEY = 'servers' as const
 /** Keys this plugin owns inside one server entry; everything else round-trips. */
 const OWNED_SERVER_KEYS = [
   'type', 'command', 'args', 'env', 'environment', 'cwd', 'url', 'headers',
-  'toolCallTimeoutMs', 'reconnect', 'enabled', 'disabled', 'sensitive',
-  'envSensitive', 'headerSensitive', 'disabledTools',
+  'toolCallTimeoutMs', 'startupTimeoutMs', 'closeTimeoutMs', 'reconnect', 'toolLoading', 'oauth',
+  'enabled', 'disabled', 'sensitive', 'envSensitive', 'headerSensitive', 'disabledTools',
 ] as const
 
 /** One parsed document plus the identity of the key the server map came from. */
@@ -119,9 +120,9 @@ export type NormalizeResult =
 /**
  * Normalize one raw `mcp.json` entry into the manager's stored shape.
  *
- * Only the fields the panel edits are normalized; validation of the resulting
- * server (transport requirements, timer bounds, the `dsh-mcp-client` schema) is
- * the caller's, so this stays a pure shape mapping.
+ * Only the fields the panel edits are normalized; the final cross-field check
+ * is {@link validateServerConfig}, so a file entry and a panel write accept the
+ * same configurations.
  * @param id - the key the entry is stored under; it becomes the server id.
  * @param raw - the raw entry value.
  * @returns the stored server, or a failure naming the offending field.
@@ -139,8 +140,6 @@ export function normalizeServer(id: string, raw: unknown): NormalizeResult {
   if (label !== undefined) {
     if (typeof label !== 'string') return { ok: false, error: '"label" must be a string' }
     server.label = label
-  } else {
-    server.label = id
   }
 
   const disabled = raw.disabled
@@ -152,7 +151,7 @@ export function normalizeServer(id: string, raw: unknown): NormalizeResult {
   if (type !== undefined && typeof type !== 'string') return { ok: false, error: '"type" must be a string' }
   const transport = transportOfJson(type, raw.url !== undefined)
   if (transport === undefined) {
-    return { ok: false, error: `unsupported transport ${JSON.stringify(type)}: dsh-mcp-client supports "stdio" and "streamable-http" only` }
+    return { ok: false, error: `unsupported transport ${JSON.stringify(type)}: the MCP client supports "stdio" and "streamable-http" only` }
   }
   server.transport = transport
 
@@ -175,24 +174,32 @@ export function normalizeServer(id: string, raw: unknown): NormalizeResult {
     server.args = args === undefined ? [] : [...args as string[]]
     if (raw.cwd !== undefined && typeof raw.cwd !== 'string') return { ok: false, error: '"cwd" must be a string' }
     server.cwd = typeof raw.cwd === 'string' ? raw.cwd : ''
+    if (raw.url !== undefined) return { ok: false, error: 'a stdio server must not set "url"' }
+    if (Object.keys(server.headers).length > 0) return { ok: false, error: 'a stdio server must not set "headers"' }
   } else {
     if (typeof raw.url !== 'string' || raw.url.trim() === '') {
       return { ok: false, error: 'an http server needs a non-empty "url"' }
     }
     server.url = raw.url
+    if (raw.command !== undefined) return { ok: false, error: 'a streamable-http server must not set "command"' }
+    if (raw.args !== undefined) return { ok: false, error: 'a streamable-http server must not set "args"' }
+    if (raw.cwd !== undefined) return { ok: false, error: 'a streamable-http server must not set "cwd"' }
+    if (Object.keys(server.env).length > 0) return { ok: false, error: 'a streamable-http server must not set "env"' }
   }
 
-  if (raw.toolCallTimeoutMs !== undefined) {
-    const timeout = raw.toolCallTimeoutMs
-    if (typeof timeout !== 'number' || !Number.isSafeInteger(timeout) || timeout < 1) {
-      return { ok: false, error: '"toolCallTimeoutMs" must be a positive integer' }
-    }
-    server.toolCallTimeoutMs = timeout
-  }
+  const toolCallTimeoutMs = readTimeout(raw.toolCallTimeoutMs, 'toolCallTimeoutMs')
+  if (toolCallTimeoutMs.error !== undefined) return { ok: false, error: toolCallTimeoutMs.error }
+  if (toolCallTimeoutMs.value !== undefined) server.toolCallTimeoutMs = toolCallTimeoutMs.value
+  const startupTimeoutMs = readTimeout(raw.startupTimeoutMs, 'startupTimeoutMs')
+  if (startupTimeoutMs.error !== undefined) return { ok: false, error: startupTimeoutMs.error }
+  if (startupTimeoutMs.value !== undefined) server.startupTimeoutMs = startupTimeoutMs.value
+  const closeTimeoutMs = readTimeout(raw.closeTimeoutMs, 'closeTimeoutMs')
+  if (closeTimeoutMs.error !== undefined) return { ok: false, error: closeTimeoutMs.error }
+  if (closeTimeoutMs.value !== undefined) server.closeTimeoutMs = closeTimeoutMs.value
 
   if (raw.reconnect !== undefined) {
     if (!isRecord(raw.reconnect)) return { ok: false, error: '"reconnect" must be an object' }
-    const reconnect = { ...DEFAULT_RECONNECT }
+    const reconnect: ReconnectPolicy = { ...DEFAULT_RECONNECT }
     for (const key of ['enabled', 'initialDelayMs', 'maxDelayMs', 'maxAttempts'] as const) {
       const value = raw.reconnect[key]
       if (value === undefined) continue
@@ -209,12 +216,62 @@ export function normalizeServer(id: string, raw: unknown): NormalizeResult {
     server.reconnect = reconnect
   }
 
+  if (raw.toolLoading !== undefined) {
+    if (!isToolLoading(raw.toolLoading)) return { ok: false, error: '"toolLoading" must be "eager" or "on-demand"' }
+    server.toolLoading = raw.toolLoading
+  }
+
+  if (raw.oauth !== undefined) {
+    if (!isRecord(raw.oauth)) return { ok: false, error: '"oauth" must be an object' }
+    const oauth = normalizeOAuth(raw.oauth)
+    if (!oauth.ok) return oauth
+    server.oauth = oauth.oauth
+  }
+
   const sensitive = readSensitive(raw)
   if (!sensitive.ok) return sensitive
   server.envSensitive = [...sensitive.env]
   server.headerSensitive = [...sensitive.headers]
 
+  try {
+    validateServerConfig(server)
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
   return { ok: true, server }
+}
+
+function normalizeOAuth(raw: Record<string, unknown>): { ok: true; oauth: OAuthPolicy } | { ok: false; error: string } {
+  if (typeof raw.credentialKey !== 'string' || raw.credentialKey.trim() === '') {
+    return { ok: false, error: '"oauth.credentialKey" must be a non-empty string' }
+  }
+  const oauth: OAuthPolicy = {
+    credentialKey: raw.credentialKey,
+    requestTimeoutMs: DEFAULT_OAUTH_REQUEST_TIMEOUT_MS,
+    authorizationTimeoutMs: DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS,
+  }
+  if (raw.clientId !== undefined) {
+    if (typeof raw.clientId !== 'string') return { ok: false, error: '"oauth.clientId" must be a string' }
+    oauth.clientId = raw.clientId
+  }
+  if (raw.scope !== undefined) {
+    if (typeof raw.scope !== 'string') return { ok: false, error: '"oauth.scope" must be a string' }
+    oauth.scope = raw.scope
+  }
+  for (const key of ['requestTimeoutMs', 'authorizationTimeoutMs'] as const) {
+    const value = readTimeout(raw[key], `oauth.${key}`)
+    if (value.error !== undefined) return { ok: false, error: value.error }
+    if (value.value !== undefined) oauth[key] = value.value
+  }
+  return { ok: true, oauth }
+}
+
+function readTimeout(value: unknown, field: string): { value?: number; error?: string } {
+  if (value === undefined) return {}
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    return { error: `"${field}" must be a positive integer` }
+  }
+  return { value }
 }
 
 /**
@@ -256,7 +313,11 @@ export function serverToRaw(server: StoredServer): Record<string, unknown> {
   if (Object.keys(server.env).length > 0) raw.env = { ...server.env }
   if (Object.keys(server.headers).length > 0) raw.headers = { ...server.headers }
   if (server.toolCallTimeoutMs !== DEFAULT_TOOL_CALL_TIMEOUT_MS) raw.toolCallTimeoutMs = server.toolCallTimeoutMs
+  if (server.startupTimeoutMs !== DEFAULT_STARTUP_TIMEOUT_MS) raw.startupTimeoutMs = server.startupTimeoutMs
+  if (server.closeTimeoutMs !== DEFAULT_CLOSE_TIMEOUT_MS) raw.closeTimeoutMs = server.closeTimeoutMs
   if (!sameReconnect(server.reconnect)) raw.reconnect = { ...server.reconnect }
+  if (server.toolLoading !== 'eager') raw.toolLoading = server.toolLoading
+  if (server.oauth !== undefined) raw.oauth = { ...server.oauth }
   if (server.envSensitive.length > 0 || server.headerSensitive.length > 0) {
     raw.sensitive = {
       ...server.envSensitive.length > 0 ? { env: [...server.envSensitive] } : {},

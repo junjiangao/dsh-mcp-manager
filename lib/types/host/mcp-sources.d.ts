@@ -9,14 +9,15 @@
  * | project (compat) | `<project>/.mcp.json` | Claude Code's file, read-only |
  * | profile | `~/.dsh/profiles/<profile>/mcp.json` | the default target for a new server |
  * | user | `~/.dsh/mcp.json` | honours `$DSH_HOME` |
- * | entry (legacy) | the `web-mcp-manager` Loader entry's `Config.servers` | read-only until migrated |
  *
  * A server name defined in more than one scope keeps the highest-precedence
  * definition and reports the rest as shadowed, so the panel can show them
  * instead of silently dropping user configuration.
  *
- * This module is pure: it takes filesystem read outcomes and the entry config,
- * and returns the merged model.
+ * This module is pure: it takes filesystem read outcomes and returns the merged
+ * model. The official `mcp-manager` configuration entries are a separate
+ * source the browser reads through the shared settings form; they never pass
+ * through this file.
  */
 import type { ReadResult } from './mcp-file.ts';
 import type { McpScope, StoredServer } from '../types.ts';
@@ -40,6 +41,10 @@ export interface SourcedServer {
     readonly id: string;
     readonly scope: McpScope;
     readonly path: string;
+    /** Whether the winning definition lives in a writable file. */
+    readonly writable: boolean;
+    /** Whether the winning definition is another client's read-only file. */
+    readonly compat: boolean;
     readonly server: StoredServer;
     readonly shadowed: readonly {
         readonly scope: McpScope;
@@ -50,44 +55,39 @@ export interface SourcedServer {
 export interface MergedSources {
     readonly servers: readonly SourcedServer[];
     readonly sources: readonly SourceRow[];
+    /** Per-entry failures from every file, including shadowed scopes. */
+    readonly problems: readonly {
+        readonly scope: McpScope;
+        readonly path: string;
+        readonly id: string;
+        readonly error: string;
+    }[];
 }
 /** Inputs for {@link mergeSources}. */
 export interface MergeInput {
     /** Read outcomes in precedence order, as `readScopeFiles` returns them. */
     readonly scopes: readonly ReadResult[];
-    /** Legacy servers from the Loader entry `Config`. */
-    readonly entryServers: Readonly<Record<string, StoredServer>>;
-    /** Display path for the legacy row (the entry owns no file of its own). */
-    readonly entryPath: string;
 }
 /**
  * Merge every source into the effective server set.
- * @param input - read outcomes and the legacy entry servers.
+ * @param input - read outcomes.
  * @returns the effective servers and one row per source.
  */
 export declare function mergeSources(input: MergeInput): MergedSources;
-/** Environment variables one stored server keeps as templates. */
-export interface ServerTemplates {
-    readonly env: readonly string[];
-    readonly headers: readonly string[];
-}
-/**
- * Names the server still holds as `${…}` templates, for panel display.
- * @param server - the stored server.
- * @returns referenced names per map, in first-seen order.
- */
-export declare function serverTemplates(server: StoredServer): ServerTemplates;
 /** Outcome of projecting one server into an mcp-client-ready definition. */
 export interface ExpandedServer {
     readonly server: StoredServer;
-    /** Referenced variables with no value and no fallback. */
+    /** Referenced environment variables with no value and no fallback. */
     readonly missing: readonly string[];
 }
 /**
- * Resolve `${…}` templates in every text field a server carries.
+ * Resolve `${env:…}` templates in every text field a server carries.
  *
- * Expansion happens only here — on the way into `@deepseek-ai/dsh-mcp-client` —
- * so a template never reaches the panel and is never written back expanded.
+ * Expansion happens only here — on the way into
+ * `ctx.mcpManager.register()` — so a template never reaches the panel and is
+ * never written back expanded. `${credential:…}` tokens are deliberately left
+ * untouched: the official MCP client resolves them through the credentials
+ * service and redacts the resolved values from diagnostics.
  * @param server - the stored server, templates intact.
  * @param env - ambient environment.
  * @returns the expanded server and the unresolved variable names.

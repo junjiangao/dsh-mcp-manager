@@ -1,102 +1,118 @@
+/** The editor form model: strings in, a validated patch or official entry out. */
+
 import { describe, expect, it } from 'vitest'
-import type { ManagedServerView } from '../src/types.ts'
-import { defaultServer, validateServerId } from '../src/settings.ts'
-import { mergeServerPatch, redactServer } from '../src/protocol.ts'
-import { SERVER_ID_PATTERN, draftFromServer, draftPatch, duplicateDraftKeys, newSecretDraft } from '../src/client/draft.ts'
+import { createDraft, entryFromDraft, isEntryTarget, patchFromDraft, scopeOf, validateDraft, type ServerDraft } from '../src/client/draft.ts'
+import type { ServerSummary } from '../src/client/summary.ts'
 
-function view(args: readonly string[] = [], env: Record<string, string> = {}): ManagedServerView {
-  return redactServer({ ...defaultServer('demo'), command: 'node', args: [...args], env }, 'loaded', 0)
+function row(overrides: Partial<ServerSummary> = {}): ServerSummary {
+  return {
+    name: 'demo',
+    kind: 'file',
+    label: 'demo',
+    enabled: true,
+    transport: 'stdio',
+    scope: 'profile',
+    path: '/p/mcp.json',
+    writable: true,
+    compat: false,
+    shadowed: [],
+    command: 'node',
+    args: ['server.js'],
+    cwd: '',
+    url: '',
+    env: [{ key: 'TOKEN', state: { set: true, sensitive: true, template: false, credential: false } }],
+    headers: [],
+    toolCallTimeoutMs: 60_000,
+    startupTimeoutMs: 30_000,
+    closeTimeoutMs: 5_000,
+    reconnect: { enabled: true, initialDelayMs: 500, maxDelayMs: 30_000, maxAttempts: 10 },
+    toolLoading: 'eager',
+    tools: [],
+    disabledTools: [],
+    conflict: false,
+    ...overrides,
+  }
 }
 
-describe('MCP draft projection helpers', () => {
-  it('keeps args verbatim (no trimming or filtering)', () => {
-    const draft = draftFromServer(view([' padded ', '', 'ok']))
-    expect(draftPatch(draft).args).toEqual([' padded ', '', 'ok'])
+function draftOf(overrides: Partial<ServerDraft>): ServerDraft {
+  return { ...createDraft(undefined, 'profile'), name: 'demo', command: 'node', ...overrides }
+}
+
+describe('drafts', () => {
+  it('starts from a file row, masking stored secrets', () => {
+    const draft = createDraft(row())
+    expect(draft.target).toBe('profile')
+    expect(draft.env[0]).toEqual({ key: 'TOKEN', value: '', secret: true, configured: true })
+    expect(draft.toolCallTimeoutMs).toBe('60000')
   })
 
-  it('keeps args that contain newlines verbatim', () => {
-    const draft = draftFromServer(view(['a\nb', 'ok']))
-    expect(draftPatch(draft).args).toEqual(['a\nb', 'ok'])
-  })
-
-  it('emits { clear: true } for env rows removed from the draft', () => {
-    const draft = draftFromServer(view([], { TOKEN: 'old-value' }))
-    const env = draft.env.filter(entry => entry.key !== 'TOKEN')
-    const patch = draftPatch({ ...draft, env })
-    expect(patch.env.TOKEN).toEqual({ clear: true })
-    const merged = mergeServerPatch(defaultServer('demo'), patch)
-    expect(merged.env).toEqual({})
-  })
-
-  it('clears the original key and sets the new one when a row is renamed', () => {
-    const draft = draftFromServer(view([], { TOKEN: 'old-value' }))
-    const env = draft.env.map(entry => entry.key === 'TOKEN' ? { ...entry, key: 'KEY', value: 'new-value' } : entry)
-    const patch = draftPatch({ ...draft, env })
-    expect(patch.env.TOKEN).toEqual({ clear: true })
-    expect(patch.env.KEY).toBe('new-value')
-    const merged = mergeServerPatch(defaultServer('demo'), patch)
-    expect(merged.env).toEqual({ KEY: 'new-value' })
-  })
-
-  it('reports duplicate keys and ignores empty ones', () => {
-    const draft = draftFromServer(view([], { A: '1', B: '2' }))
-    const entries = [...draft.env, { ...newSecretDraft(), key: 'A' }, { ...newSecretDraft(), key: '' }]
-    expect(duplicateDraftKeys(entries)).toEqual(['A'])
-    expect(duplicateDraftKeys(draft.env)).toEqual([])
-  })
-
-  it('round-trips an unmodified draft idempotently', () => {
-    const server = { ...defaultServer('demo'), label: 'Demo', command: 'node', args: ['--flag'], env: { TOKEN: 'old-value' } }
-    const draft = draftFromServer(redactServer(server, 'loaded', 0))
-    const merged = mergeServerPatch(server, draftPatch(draft))
-    expect(merged).toEqual(server)
-  })
-
-  it('compiles the server id pattern under the v flag like browsers do', () => {
-    // HTML `pattern` attributes compile with the UnicodeSets (v) flag; the
-    // escaped dash keeps the character class valid there.
-    expect(() => new RegExp(SERVER_ID_PATTERN, 'v')).not.toThrow()
-    const pattern = new RegExp(`^(?:${SERVER_ID_PATTERN})$`, 'v')
-    for (const id of ['codebase-memory', '-leading', 'a_b-c', 'mcp_1', 'X'.repeat(32)]) {
-      expect(pattern.test(id)).toBe(true)
-      expect(() => validateServerId(id)).not.toThrow()
-    }
-    for (const id of ['', 'has space', '中文', 'X'.repeat(33)]) {
-      expect(pattern.test(id)).toBe(false)
-      expect(() => validateServerId(id)).toThrow()
-    }
+  it('starts from an official entry row and keeps its OAuth policy', () => {
+    const draft = createDraft(row({
+      kind: 'entry', scope: undefined, oauth: { credentialKey: 'mcp-client/demo', requestTimeoutMs: 1, authorizationTimeoutMs: 2 },
+      transport: 'streamable-http', command: '', args: [], url: 'https://x.test/mcp',
+    }))
+    expect(draft.target).toBe('entry')
+    expect(draft.oauthEnabled).toBe(true)
+    expect(draft.oauthCredentialKey).toBe('mcp-client/demo')
   })
 })
 
-describe('MCP draft scope and template rows', () => {
-  it('carries the scope the editor targeted', () => {
-    // A new server takes the panel default; an existing one keeps its own scope.
-    expect(draftFromServer(undefined, 'project').scope).toBe('project')
-    expect(draftPatch(draftFromServer(undefined, 'project')).scope).toBe('project')
-    expect(draftFromServer(viewWithScope('user'), 'project').scope).toBe('user')
+describe('validation', () => {
+  it('reports each invalid field once', () => {
+    expect(validateDraft(draftOf({ name: 'bad id' }))).toContain('name')
+    expect(validateDraft(draftOf({ command: '  ' }))).toContain('command')
+    expect(validateDraft(draftOf({ transport: 'streamable-http', url: 'ftp://x' }))).toContain('url')
+    expect(validateDraft(draftOf({ toolCallTimeoutMs: '0' }))).toContain('timeout')
+    expect(validateDraft(draftOf({ env: [{ key: '', value: 'x', secret: false, configured: false }] }))).toContain('envKey')
+    expect(validateDraft(draftOf({ oauthEnabled: true, oauthCredentialKey: 'nope', transport: 'streamable-http', url: 'https://x', command: '' }))).toContain('oauthKey')
+    expect(validateDraft(draftOf({ reconnectEnabled: true, reconnectInitial: '900', reconnectMax: '100' }))).toContain('reconnect')
   })
 
-  it('never rewrites or clears a row whose value is an environment template', () => {
-    const draft = draftFromServer(viewWithTemplates())
-    const token = draft.env.find(entry => entry.key === 'TOKEN')
-    expect(token?.templated).toBe(true)
-    // Even after the row is deleted from the draft, the template survives.
-    const patch = draftPatch({ ...draft, env: [] })
-    expect(patch.env.TOKEN).toBeUndefined()
-    // And it is not reported as a managed sensitive key.
-    expect(patch.envSensitive).toEqual([])
+  it('accepts a complete draft', () => {
+    expect(validateDraft(draftOf({}))).toEqual([])
   })
 })
 
-function viewWithScope(scope: ManagedServerView['scope']): ManagedServerView {
-  return redactServer(
-    { ...defaultServer('demo'), command: 'node' }, 'loaded', 0, undefined, scope,
-  )
-}
+describe('projections', () => {
+  it('maps targets and scopes', () => {
+    expect(scopeOf('entry')).toBe('profile')
+    expect(scopeOf('project')).toBe('project')
+    expect(isEntryTarget('entry')).toBe(true)
+    expect(isEntryTarget('user')).toBe(false)
+  })
 
-function viewWithTemplates(): ManagedServerView {
-  return redactServer(
-    { ...defaultServer('demo'), command: 'node', env: { TOKEN: '${env:TOKEN}' } },
-    'loaded', 0, undefined, 'user', [], { env: ['TOKEN'], headers: [] },
-  )
-}
+  it('keeps a masked secret and writes the sensitive key list', () => {
+    const patch = patchFromDraft(draftOf({
+      env: [{ key: 'TOKEN', value: '', secret: true, configured: true }, { key: 'A', value: '1', secret: false, configured: false }],
+    }))
+    expect(patch.env).toEqual({ TOKEN: {}, A: '1' })
+    expect(patch.envSensitive).toEqual(['TOKEN'])
+    expect(patch.transport).toBe('stdio')
+    expect(patch.oauth).toBeUndefined()
+  })
+
+  it('writes URL, headers, and OAuth for an http target', () => {
+    const patch = patchFromDraft(draftOf({
+      transport: 'streamable-http', url: 'https://x.test/mcp', command: '',
+      headers: [{ key: 'Authorization', value: 'Bearer t', secret: true, configured: false }],
+      oauthEnabled: true, oauthCredentialKey: 'mcp-client/demo',
+    }))
+    expect(patch.url).toBe('https://x.test/mcp')
+    expect(patch.headers).toEqual({ Authorization: 'Bearer t' })
+    expect(patch.headerSensitive).toEqual(['Authorization'])
+    expect(patch.oauth).toMatchObject({ credentialKey: 'mcp-client/demo' })
+  })
+
+  it('builds a complete official entry without the other transport fields', () => {
+    const stdio = entryFromDraft(draftOf({ cwd: '/work', command: 'node', args: ['server.js'] }))
+    expect(stdio).toMatchObject({ transport: 'stdio', command: 'node', args: ['server.js'], cwd: '/work' })
+    expect(stdio.url).toBeUndefined()
+    const http = entryFromDraft(draftOf({
+      transport: 'streamable-http', command: '', url: 'https://x.test/mcp',
+      oauthEnabled: true, oauthCredentialKey: 'mcp-client/demo',
+    }))
+    expect(http.command).toBeUndefined()
+    expect(http.env).toBeUndefined()
+    expect(http.oauth).toMatchObject({ credentialKey: 'mcp-client/demo' })
+  })
+})

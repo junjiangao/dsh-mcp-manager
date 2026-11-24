@@ -72,9 +72,9 @@ export type NormalizeResult = {
 /**
  * Normalize one raw `mcp.json` entry into the manager's stored shape.
  *
- * Only the fields the panel edits are normalized; validation of the resulting
- * server (transport requirements, timer bounds, the `dsh-mcp-client` schema) is
- * the caller's, so this stays a pure shape mapping.
+ * Only the fields the panel edits are normalized; the final cross-field check
+ * is {@link validateServerConfig}, so a file entry and a panel write accept the
+ * same configurations.
  * @param id - the key the entry is stored under; it becomes the server id.
  * @param raw - the raw entry value.
  * @returns the stored server, or a failure naming the offending field.

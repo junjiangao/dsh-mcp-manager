@@ -1,25 +1,24 @@
-/** Settings → MCP page. It intentionally owns no durable state. */
+/** Settings → MCP: one page over the official entries and every file scope. */
 
-import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react'
+import { useMemo, useState, useSyncExternalStore } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  Button, Checkbox, Input, RiskConfirmation, SegmentedControl, StateDot, Switch, Tag,
-  type StateDotState, type TagTone,
+  Button, IconPlusOutlineRegular, IconRefreshOutlineRegular, Input, Modal, RiskConfirmation, SegmentedControl, StateDot, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ManagedServerView, ManagedToolView, McpScope, ReadonlyMcpEntry, SecretInput, Snapshot } from '../types.ts'
-import { PLUGIN_IDENTITY } from '../types.ts'
-import type { ManagerClientApi } from './api.ts'
-import type { EntryFormFace } from './entry-form.ts'
+import type { McpScope } from '../types.ts'
 import type { ManagerStore } from './manager-store.ts'
 import type { McpLocaleKey } from './locales.ts'
-import { SERVER_ID_PATTERN, draftFromServer, draftPatch, duplicateDraftKeys, newSecretDraft, type SecretDraft, type ServerDraft } from './draft.ts'
+import { createDraft, entryFromDraft, patchFromDraft, scopeOf, type DraftTarget, type ServerDraft } from './draft.ts'
+import { buildSummaries, filterSummaries, rowToJson, type ServerSummary, type SourceFilter, type StatusFilter } from './summary.ts'
+import { countStatuses } from './status.ts'
+import { copyText, cx, PANEL_CSS } from './panel-css.ts'
+import { ServerCard } from './ServerCard.tsx'
+import { ServerEditor } from './ServerEditor.tsx'
+import { ProbeDialog } from './ProbeDialog.tsx'
+import { OAuthDialog } from './OAuthDialog.tsx'
 
+/** What the section registration injects. */
 export interface McpSectionInjected {
-  /** The manager's own RPC: the `mcp.json` scopes and runtime status. */
-  readonly api: ManagerClientApi
-  /** The official shared settings form: the legacy Loader-entry scope. */
-  readonly entry: EntryFormFace
-  /** The Host view and the read loop, in the official client store. */
   readonly store: ManagerStore
 }
 
@@ -28,850 +27,275 @@ export type McpSectionProps =
   & PropsLocale<'settings.mcpManager'>
   & InjectFace<McpSectionInjected>
 
-const STATUS_KEYS: Record<ManagedServerView['status'], McpLocaleKey> = {
-  disabled: 'disabled',
-  waiting: 'waiting',
-  loading: 'loading',
-  loaded: 'loaded',
-  failed: 'failed',
+interface EditorState {
+  readonly row?: ServerSummary
+  readonly draft: ServerDraft
 }
 
-/* ---------- Presentation constants (host `--dsw-*` design tokens + safe fallbacks) ---------- */
-
-/**
- * Corner radii are plain lengths on purpose.
- *
- * `--dsw-corner-shape` is NOT a radius: the host defines it as a
- * `corner-shape` function (`superellipse(1.5)`) and applies it to every
- * element from its own `@supports` block. Feeding it to `border-radius`
- * makes the declaration invalid, so on any browser that supports
- * `corner-shape` the whole panel would silently fall back to square corners.
- */
-const RADIUS_CARD = '8px'
-const RADIUS_CTRL = '6px'
-const MONO_FONT = 'var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)'
-
-/**
- * Makes an official `Input` fill its grid cell.
- *
- * `Input` puts `className` on its own inline-flex wrapper and renders the
- * native input inside it, so a width on the input alone would not stretch the
- * control.
- */
-const FILL = 'mcp-fill'
-
-/**
- * Every token below is verified to exist in `@deepseek-ai/dsh-client-ui-theme`
- * (light under `body`, dark under `body[data-ds-dark-theme]`). Tokens that do
- * not exist keep the hardcoded fallback in both themes, so only well-known
- * names are used here.
- */
-const COLORS = {
-  text: 'var(--dsw-alias-label-primary, #0f1115)',
-  textSecondary: 'var(--dsw-alias-label-secondary, #61666b)',
-  textTertiary: 'var(--dsw-alias-label-tertiary, #81858c)',
-  border: 'var(--dsw-alias-border-l2, #e1e5ee)',
-  borderSubtle: 'var(--dsw-alias-border-l1, #ebeef2)',
-  borderStrong: 'var(--dsw-alias-border-l3, #dcdcdc)',
-  surface: 'var(--dsw-alias-bg-layer-2, #ffffff)',
-  surfaceSubtle: 'var(--dsw-alias-bg-layer-1, #fafafa)',
-  surfaceRaised: 'var(--dsw-alias-bg-layer-3, #f5f5f5)',
-  business: 'var(--dsw-alias-state-business-primary, #2f6fed)',
-  warn: 'var(--dsw-alias-state-warn-primary, #f59e0b)',
-  danger: 'var(--dsw-alias-state-error-primary, #ec1313)',
-} as const
-
-const ELEVATION_SOFT = 'var(--dsw-elevation-soft, 0 1px 2px rgba(16, 24, 40, 0.05))'
-
-/**
- * Scoped stylesheet for the panel's own layout.
- *
- * Interactive chrome is no longer styled here: every control is an official
- * `@deepseek-ai/dsh-client-ui-primitives` component that brings its own
- * themed stylesheet, so this sheet is left with the card hover, the native
- * `select`/`textarea` metrics the primitives do not cover, the `<details>`
- * chevron, the disabled affordance, and the two deliberate departures
- * (`FILL` to stretch an `Input`, `data-mcp-danger` because the primitives
- * expose no destructive button variant). `!important` is deliberate: the
- * panel's base look is inline, and inline declarations otherwise win.
- */
-const PANEL_CSS = [
-  '[data-mcp-manager="panel"] :focus-visible { outline: 2px solid ' + COLORS.business + '; outline-offset: 1px; }',
-  '[data-mcp-manager="panel"] button:disabled { opacity: .45; cursor: not-allowed !important; }',
-  '[data-mcp-manager="panel"] button[data-mcp-danger]:not(:disabled) { color: ' + COLORS.danger + ' !important; border-color: ' + COLORS.danger + ' !important; }',
-  '[data-mcp-manager="panel"] button[data-mcp-danger]:not(:disabled):hover { background: var(--dsw-alias-interactive-bg-hover-danger, rgba(236, 19, 19, 0.06)) !important; }',
-  '[data-mcp-manager="panel"] .' + FILL + ' { display: flex; width: 100%; max-width: 100%; }',
-  '[data-mcp-manager="panel"] [data-mcp-server] { transition: border-color .15s ease, box-shadow .15s ease; }',
-  '[data-mcp-manager="panel"] [data-mcp-server]:hover { border-color: ' + COLORS.borderStrong + ' !important; box-shadow: var(--dsw-elevation-panel, ' + ELEVATION_SOFT + ') !important; }',
-  '[data-mcp-manager="panel"] input, [data-mcp-manager="panel"] select, [data-mcp-manager="panel"] textarea { transition: border-color .15s ease, background-color .15s ease; }',
-  '[data-mcp-manager="panel"] select:not(:disabled):hover, [data-mcp-manager="panel"] textarea:not(:disabled):hover { border-color: ' + COLORS.borderStrong + ' !important; }',
-  '[data-mcp-manager="panel"] select:focus-visible, [data-mcp-manager="panel"] textarea:focus-visible { border-color: ' + COLORS.business + ' !important; }',
-  '[data-mcp-manager="panel"] summary { display: flex; align-items: center; gap: 6px; list-style: none; cursor: pointer; }',
-  '[data-mcp-manager="panel"] summary::-webkit-details-marker { display: none; }',
-  '[data-mcp-manager="panel"] summary::before { content: ""; flex: 0 0 auto; width: 0; height: 0; border-left: 5px solid currentColor; border-top: 4px solid transparent; border-bottom: 4px solid transparent; opacity: .55; transition: transform .15s ease; }',
-  '[data-mcp-manager="panel"] details[open] > summary::before { transform: rotate(90deg); }',
-  '[data-mcp-manager="panel"] summary:hover { color: ' + COLORS.text + ' !important; }',
-].join('\n')
-const PANEL_STYLE_ID = 'mcp-manager-panel-style'
-
-/**
- * Status → official `Tag` tone and `StateDot` state.
- *
- * The panel no longer owns a status palette: `Tag` supplies the surface and
- * `StateDot` the glyph, both from the theme tokens the rest of the product
- * uses, so a status reads the same here as anywhere else.
- */
-const TAG_TONES: Record<ManagedServerView['status'], TagTone> = {
-  loaded: 'success',
-  waiting: 'warning',
-  loading: 'info',
-  failed: 'danger',
-  disabled: 'neutral',
-}
-
-const DOT_STATES: Record<ManagedServerView['status'], StateDotState> = {
-  loaded: 'done',
-  waiting: 'warning',
-  loading: 'ongoing',
-  failed: 'error',
-  disabled: 'idle',
-}
-
-/** Localized label per source scope. */
-const SCOPE_KEYS = {
-  project: 'scopeProject',
-  profile: 'scopeProfile',
-  user: 'scopeUser',
-  entry: 'scopeEntry',
-} as const
-
-/** Every scope, in the order the editor's segmented control shows them. */
-const SCOPE_OPTIONS: readonly McpScope[] = ['project', 'profile', 'user', 'entry']
-
-const TRANSPORT_OPTIONS: readonly { readonly value: ServerDraft['transport']; readonly label: McpLocaleKey }[] = [
-  { value: 'stdio', label: 'stdio' },
-  { value: 'streamable-http', label: 'http' },
-]
-
-const panelStyle: React.CSSProperties = {
-  maxWidth: 860,
-  padding: 16,
-  color: COLORS.text,
-  fontFamily: 'var(--dsw-font-family, system-ui, -apple-system, "Segoe UI", sans-serif)',
-}
-
-const headerStyle: React.CSSProperties = { marginBlock: '4px 0' }
-const headerRowStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
-const titleStyle: React.CSSProperties = {
-  margin: 0,
-  marginInlineEnd: 'auto',
-  fontSize: 'var(--dsw-font-base-16-font-size, 16px)',
-  lineHeight: 'var(--dsw-font-base-16-line-height, 24px)',
-  fontWeight: 600,
-  color: COLORS.text,
-}
-const subtitleRowStyle: React.CSSProperties = { marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }
-const metaLabelStyle: React.CSSProperties = { fontSize: 12, lineHeight: '18px', color: COLORS.textTertiary }
-const identityChipStyle: React.CSSProperties = {
-  fontFamily: MONO_FONT,
-  fontSize: 12,
-  lineHeight: '18px',
-  color: COLORS.textTertiary,
-  background: 'transparent',
-  border: '1px solid ' + COLORS.borderSubtle,
-  borderRadius: RADIUS_CTRL,
-  padding: '1px 6px',
-  whiteSpace: 'nowrap',
-}
-
-const fieldLabelStyle: React.CSSProperties = {
-  display: 'block',
-  fontSize: 12,
-  lineHeight: '18px',
-  color: COLORS.textTertiary,
-  marginBottom: 4,
-}
-/**
- * The one native control the primitives do not cover: a multi-line command.
- * It keeps the panel's field metrics so it sits level with the official
- * `Input` beside it.
- */
-const textareaStyle: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box',
-  padding: '6px 10px',
-  fontSize: 13,
-  lineHeight: '18px',
-  color: COLORS.text,
-  background: 'var(--dsw-alias-bg-layer-1, #ffffff)',
-  border: '1px solid ' + COLORS.border,
-  borderRadius: RADIUS_CTRL,
-  resize: 'vertical',
-}
-
-const searchLabelStyle: React.CSSProperties = { display: 'block', width: '100%', marginBlock: '14px 16px' }
-
-/**
- * Metrics for the two native controls the primitives do not cover.
- *
- * `@deepseek-ai/dsh-client-ui-primitives` renders text inputs, checkboxes,
- * switches, segmented controls, tags, and dots, but no `select` and no
- * `textarea`. The workspace picker needs an open-ended option list and the
- * command is multi-line, so both stay native and borrow the panel's field
- * metrics to sit level with the official `Input` beside them.
- */
-const selectStyle: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box',
-  height: 32,
-  padding: '0 8px',
-  fontSize: 14,
-  lineHeight: '22px',
-  color: COLORS.text,
-  background: 'var(--dsw-alias-bg-layer-1, #ffffff)',
-  border: '0.5px solid var(--dsw-alias-border-l4, ' + COLORS.border + ')',
-  borderRadius: 'var(--dsw-radius-md, ' + RADIUS_CTRL + ')',
-}
-
-const cardStyle: React.CSSProperties = {
-  background: COLORS.surface,
-  border: '1px solid ' + COLORS.border,
-  borderRadius: RADIUS_CARD,
-  padding: 16,
-  marginBlock: 10,
-  boxShadow: ELEVATION_SOFT,
-}
-
-const cardHeaderRowStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
-const cardTitleStyle: React.CSSProperties = { fontWeight: 600, fontSize: 15, lineHeight: '22px', color: COLORS.text }
-const codeStyle: React.CSSProperties = { fontFamily: MONO_FONT, fontSize: 12, color: COLORS.textSecondary }
-const codeCaptionStyle: React.CSSProperties = { fontFamily: MONO_FONT, fontSize: 12, color: COLORS.textTertiary }
-/** Let an inline `Tag` sit at the end of a flex row without stretching. */
-const tagRailStyle: React.CSSProperties = { marginInlineStart: 'auto' }
-const metaLineStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  minWidth: 0,
-  color: COLORS.textTertiary,
-  fontSize: 12,
-  lineHeight: '18px',
-  marginBlock: '8px 0',
-}
-/** Positioning only: `Tag` owns the palette, so a render site may space it. */
-const metaTagStyle: React.CSSProperties = { flex: '0 0 auto' }
-/** Keeps the status dot and its label on one optical line inside a `Tag`. */
-const statusBadgeStyle: React.CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 6 }
-const metaCodeStyle: React.CSSProperties = {
-  ...codeCaptionStyle,
-  minWidth: 0,
-  overflow: 'hidden',
-  whiteSpace: 'nowrap',
-  textOverflow: 'ellipsis',
-}
-
-const errorBoxStyle: React.CSSProperties = {
-  background: 'var(--dsw-alias-interactive-bg-hover-danger, rgba(236, 19, 19, 0.06))',
-  borderInlineStart: '3px solid ' + COLORS.danger,
-  color: COLORS.text,
-  padding: '8px 12px',
-  borderRadius: RADIUS_CTRL,
-  marginBlock: 8,
-  fontSize: 13,
-  lineHeight: '20px',
-}
-const noticeBoxStyle: React.CSSProperties = {
-  background: 'var(--dsw-alias-state-warn-tertiary, #fef5e7)',
-  borderInlineStart: '3px solid ' + COLORS.warn,
-  color: COLORS.text,
-  padding: '8px 12px',
-  borderRadius: RADIUS_CTRL,
-  marginBlock: 8,
-  fontSize: 13,
-  lineHeight: '20px',
-}
-const statusTextStyle: React.CSSProperties = { color: COLORS.textSecondary, marginBlock: 8, fontSize: 13 }
-const emptyStateStyle: React.CSSProperties = {
-  color: COLORS.textTertiary,
-  border: '1px dashed ' + COLORS.border,
-  borderRadius: RADIUS_CARD,
-  padding: '20px 16px',
-  marginBlock: 10,
-  fontSize: 13,
-  textAlign: 'center',
-}
-const hintStyle: React.CSSProperties = { color: COLORS.textTertiary, fontSize: 12, lineHeight: '18px', marginBlock: 4 }
-
-const actionsRowStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  marginBlock: '12px 0',
-  paddingBlockStart: 12,
-  borderTop: '1px solid ' + COLORS.borderSubtle,
-  flexWrap: 'wrap',
-}
-
-const collapseStyle: React.CSSProperties = { marginBlock: 12 }
-const summaryStyle: React.CSSProperties = {
-  cursor: 'pointer',
-  color: COLORS.textSecondary,
-  fontWeight: 500,
-  fontSize: 13,
-  lineHeight: '20px',
-  paddingBlock: 2,
-}
-const listStyle: React.CSSProperties = { listStyle: 'none', margin: 0, padding: 0 }
-const toolItemStyle: React.CSSProperties = {
-  paddingBlock: 10,
-  borderBottom: '1px solid ' + COLORS.borderSubtle,
-}
-const toolRowStyle: React.CSSProperties = { display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap', fontSize: 13, lineHeight: '18px' }
-const toolDescriptionStyle: React.CSSProperties = { color: COLORS.textTertiary, fontSize: 12, lineHeight: '18px' }
-const paramDetailsStyle: React.CSSProperties = { marginBlock: '8px 0' }
-const preStyle: React.CSSProperties = {
-  overflow: 'auto',
-  fontSize: 12,
-  lineHeight: '18px',
-  padding: 8,
-  margin: 0,
-  background: 'var(--dsw-alias-markdown-code-block, #f9fafb)',
-  border: '1px solid ' + COLORS.borderSubtle,
-  borderRadius: RADIUS_CTRL,
-}
-
-const formTitleStyle: React.CSSProperties = { margin: '0 0 12px', fontSize: 15, lineHeight: '22px', fontWeight: 600, color: COLORS.text }
-const fieldsetStyle: React.CSSProperties = {
-  border: '1px solid ' + COLORS.borderSubtle,
-  borderRadius: RADIUS_CTRL,
-  padding: '12px 12px 4px',
-  margin: '0 0 12px',
-}
-const legendStyle: React.CSSProperties = { padding: '0 6px', fontSize: 13, fontWeight: 600, color: COLORS.textSecondary }
-const groupFieldsetStyle: React.CSSProperties = { border: 0, padding: 0, margin: '0 0 12px' }
-const formGridStyle: React.CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-  gap: '8px 16px',
-  marginBlock: 8,
-}
-const gridFieldStyle: React.CSSProperties = { marginBlock: 0 }
-const checkRowStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  marginBlock: 8,
-  fontSize: 13,
-  color: COLORS.text,
-  cursor: 'pointer',
-}
-const formActionsStyle: React.CSSProperties = { display: 'flex', gap: 8, marginBlock: '12px 4px', flexWrap: 'wrap' }
-
-const secretRowStyle: React.CSSProperties = { display: 'flex', alignItems: 'flex-end', flexWrap: 'wrap', gap: '8px 12px', marginBlock: 6 }
-const secretFieldStyle: React.CSSProperties = { flex: '1 1 200px', marginBlock: 0 }
-const secretActionsStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flex: '0 0 auto', paddingBlock: 2 }
-const secretClearLabelStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  fontSize: 13,
-  color: COLORS.text,
-  cursor: 'pointer',
-}
-
-const readonlyDetailsStyle: React.CSSProperties = { ...collapseStyle, marginBlock: 20 }
-const readonlyItemStyle: React.CSSProperties = {
-  paddingBlock: 10,
-  borderBottom: '1px solid ' + COLORS.borderSubtle,
-}
-const readonlyHeaderRowStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
-const readonlyStatusStyle: React.CSSProperties = { color: COLORS.textTertiary, fontSize: 12, lineHeight: '18px', marginBlock: '6px 0' }
-
-/* ------------------------------------------------------------------------------------------- */
-
-export function McpSection({ api, entry, store, t }: McpSectionProps): ReactNode {
-  const [query, setQuery] = useState('')
-  const [draft, setDraft] = useState<ServerDraft | undefined>()
-  /** The server whose removal is awaiting confirmation. */
-  const [pendingRemove, setPendingRemove] = useState<ManagedServerView | undefined>()
+export function McpSection(props: McpSectionProps) {
+  const { t } = props
+  const store = props.store
+  const state = useSyncExternalStore(store.state.subscribe, store.state.getSnapshot)
+  const [search, setSearch] = useState('')
+  const [source, setSource] = useState<SourceFilter>('all')
+  const [status, setStatus] = useState<StatusFilter>('all')
+  const [editor, setEditor] = useState<EditorState | undefined>(undefined)
+  const [probe, setProbe] = useState<string | undefined>(undefined)
+  const [oauth, setOauth] = useState<string | undefined>(undefined)
+  const [deleting, setDeleting] = useState<ServerSummary | undefined>(undefined)
   const [acknowledged, setAcknowledged] = useState(false)
-  /** Availability and writability of the official form that owns the entry scope. */
-  const entryView = useSyncExternalStore(entry.subscribe, entry.snapshot)
-  /** The Host view and its read loop, owned by the official client store. */
-  const view = useSyncExternalStore(store.state.subscribe, store.state.getSnapshot)
 
-  // Scoped stylesheet for states inline styles cannot express; injected once per document.
-  useEffect(() => {
-    if (document.getElementById(PANEL_STYLE_ID) !== null) return
-    const style = document.createElement('style')
-    style.id = PANEL_STYLE_ID
-    style.textContent = PANEL_CSS
-    document.head.append(style)
-  }, [])
+  const entryServers = state.upstream.value?.servers ?? {}
+  const disabledTools = state.own.value?.disabledTools ?? {}
+  const entryWritable = state.upstream.status === 'ready' && state.upstream.writable
+  const all = useMemo(
+    () => buildSummaries(state.snapshot, state.managed, entryServers, disabledTools, entryWritable),
+    [state.snapshot, state.managed, entryServers, disabledTools, entryWritable],
+  )
+  const rows = useMemo(() => filterSummaries(all, search, source, status), [all, search, source, status])
+  const counts = useMemo(() => countStatuses(all.map(row => row.runtime)), [all])
+  const workspaces = state.snapshot?.workspaces ?? []
+  const sources = state.snapshot?.sources ?? []
+  const busy = state.busy
+  const oauthName = oauth
+  const oauthRow = oauthName === undefined ? undefined : all.find(row => row.name === oauthName)
+  const deleteOpen = deleting !== undefined
 
-  // The store owns the visible-page read loop, so unmounting the page stops it.
-  useEffect(() => store.startPolling(), [store])
-
-  const { busy, message, pollFailed, projectPath } = view
-  const snapshot = view.status === 'ready' ? view.snapshot : undefined
-  const normalizedQuery = query.trim().toLocaleLowerCase()
-  const servers = useMemo(() => snapshot?.servers.filter(server => {
-    if (normalizedQuery.length === 0) return true
-    return [server.id, server.label, server.command, server.url].some(value => value.toLocaleLowerCase().includes(normalizedQuery))
-      || snapshot.tools.some(tool => tool.serverId === server.id && tool.name.toLocaleLowerCase().includes(normalizedQuery))
-  }) ?? [], [normalizedQuery, snapshot])
-  const tools = useMemo(() => snapshot?.tools.filter(tool => {
-    if (normalizedQuery.length === 0) return true
-    return `${tool.name} ${tool.description}`.toLocaleLowerCase().includes(normalizedQuery)
-  }) ?? [], [normalizedQuery, snapshot])
-
-  /**
-   * Scope a new server is written to: the project scope once the user selected
-   * a workspace, otherwise the profile's own file.
-   */
-  const defaultScope: McpScope = projectPath === undefined ? 'profile' : 'project'
-
-  /**
-   * Whether a write to one scope would be accepted right now.
-   *
-   * The two layers have different writers, so they have different gates: the
-   * entry scope follows the official form's own availability and writability,
-   * and an `mcp.json` scope follows the Host document's.
-   */
-  const canWrite = (scope: McpScope): boolean => {
-    if (snapshot?.writable === false) return false
-    return scope === 'entry' ? entryView.writable : true
-  }
-
-  /** Copy a legacy entry-scope server into the writable scope for this session. */
-  const migrate = (server: ManagedServerView): void => {
-    if (snapshot === undefined) return
-    void run(() => api.upsertServer({
-      scope: defaultScope,
-      projectPath,
-      server: {
-        id: server.id, label: server.label, enabled: server.enabled, transport: server.transport,
-        command: server.command, args: [...server.args], cwd: server.cwd, url: server.url,
-        env: Object.fromEntries(Object.keys(server.env).map(key => [key, { clear: true }])),
-        headers: Object.fromEntries(Object.keys(server.headers).map(key => [key, { clear: true }])),
-        envSensitive: [], headerSensitive: [],
-        toolCallTimeoutMs: server.toolCallTimeoutMs, reconnect: { ...server.reconnect },
-      },
-    }))
-  }
-
-  /** One RPC operation, through the store's sequence and message discipline. */
-  const run = store.run
-  /** One official-form write; a refusal is reported as the panel's conflict copy. */
-  const runEntry = (operation: () => Promise<boolean>): Promise<boolean> => store.runForm(operation, t('conflict'))
-
-  const save = async (event: FormEvent): Promise<void> => {
-    event.preventDefault()
-    if (snapshot === undefined || draft === undefined) return
-    const duplicates = [...duplicateDraftKeys(draft.env), ...duplicateDraftKeys(draft.headers)]
-    if (duplicates.length > 0) {
-      store.notify(`${t('duplicateKey')}: ${[...new Set(duplicates)].join(', ')}`)
-      return
-    }
-    const patch = draftPatch(draft)
-    // An entry-scope definition is a plugin's own configuration, so it is
-    // written through the official shared form; an `mcp.json` scope has no
-    // official surface and stays on the manager's own RPC.
-    const saved = draft.scope === 'entry'
-      ? await runEntry(() => entry.upsert(patch))
-      : await run(() => api.upsertServer({ server: patch, projectPath })) !== undefined
-    if (saved) setDraft(undefined)
-  }
-
-  /** Re-open the editor from the latest server view after a refusal (drops draft edits). */
-  const rebase = (): void => {
-    if (snapshot === undefined || draft === undefined) return
-    const current = snapshot.servers.find(server => server.id === draft.id)
-    setDraft(current === undefined ? undefined : draftFromServer(current, defaultScope))
-    store.clearMessage()
-  }
-
-  const toggleServer = (server: ManagedServerView): void => {
-    if (snapshot === undefined) return
-    const enabled = !server.enabled
-    if (server.scope === 'entry') {
-      void runEntry(() => entry.setEnabled(server.id, enabled))
-      return
-    }
-    void run(() => api.setServerEnabled({ id: server.id, enabled, projectPath }))
-  }
-
-  /**
-   * Ask before deleting a definition.
-   *
-   * Removal drops the server and its per-tool policy with no undo, so it goes
-   * through the official acknowledgement dialog rather than a blocking
-   * `window.confirm`.
-   */
-  const askRemove = (server: ManagedServerView): void => {
+  const beginDelete = (row: ServerSummary): void => {
     setAcknowledged(false)
-    setPendingRemove(server)
+    setDeleting(row)
   }
 
-  const remove = (server: ManagedServerView): void => {
-    if (snapshot === undefined) return
-    if (server.scope === 'entry') {
-      void runEntry(() => entry.remove(server.id))
-      return
-    }
-    void run(async () => {
-      const next = await api.removeServer({ id: server.id, projectPath })
-      // The per-tool policy is the entry document's own bookkeeping. Deleting
-      // the definition here leaves that row behind, so the panel clears it
-      // through the official form, the only writer of the entry now.
-      await entry.setDisabledTools(server.id, undefined)
-      return next
+  const confirmDelete = (): void => {
+    if (deleting === undefined) return
+    void store.removeServer(deleting)
+    setDeleting(undefined)
+    setAcknowledged(false)
+  }
+
+  const saveEditor = (draft: ServerDraft): void => {
+    const current = editor
+    if (current === undefined) return
+    const original = current.row
+    const write = draft.target === 'entry'
+      ? store.saveEntry(draft.name, entryFromDraft(draft))
+      : store.upsertServer({ scope: scopeOf(draft.target) as McpScope, server: patchFromDraft(draft) })
+    void write.then((accepted) => {
+      if (!accepted) return
+      if (original !== undefined && original.name !== draft.name) {
+        if (original.kind === 'entry') void store.removeEntry(original.name)
+        else void store.removeServer(original)
+      }
+      setEditor(undefined)
     })
   }
 
-  const reload = (server: ManagedServerView): void => { void run(() => api.reloadServer({ id: server.id })) }
-
-  /** The policy row the official form should hold after one tool checkbox flips. */
-  const toggleTool = (server: ManagedServerView, tool: ManagedToolView, enabled: boolean): void => {
-    const disabled = (snapshot?.tools ?? [])
-      .filter(candidate => candidate.serverId === server.id)
-      .filter(candidate => candidate.name === tool.name ? !enabled : !candidate.enabled)
-      .map(candidate => candidate.name)
-      .sort()
-    void runEntry(() => entry.setDisabledTools(server.id, disabled))
+  const openEditor = (row: ServerSummary | undefined): void => {
+    const defaultTarget: DraftTarget = entryWritable ? 'entry' : 'profile'
+    setEditor({ ...row === undefined ? {} : { row }, draft: createDraft(row, defaultTarget) })
   }
 
-  const isConflictMessage = message === t('conflict')
-
   return (
-    <section data-mcp-manager="panel" aria-busy={busy} style={panelStyle}>
-      <header style={headerStyle}>
-        <div style={headerRowStyle}>
-          <h2 style={titleStyle}>{t('title')}</h2>
-          <Button variant="primary" onClick={() => setDraft(draftFromServer(undefined, defaultScope))} disabled={busy || !canWrite(defaultScope)}>{t('add')}</Button>
-          <Button variant="outline" onClick={() => { void store.refresh() }} disabled={busy}>{t('refresh')}</Button>
+    <section className={cx('dsh-mcp')} aria-labelledby="dsh-mcp-title">
+      <style>{PANEL_CSS}</style>
+      <header className={cx('dsh-mcp-hero')}>
+        <div>
+          <h2 id="dsh-mcp-title">{t('title')}</h2>
+          <p>{t('subtitle')}</p>
         </div>
-        <div style={subtitleRowStyle}>
-          <span style={metaLabelStyle}>{t('pluginId')}</span>
-          <span style={identityChipStyle}>{PLUGIN_IDENTITY}</span>
+        <div className={cx('dsh-mcp-hero-actions')}>
+          <Button variant="outline" size="sm" icon={<IconRefreshOutlineRegular size={14} />} disabled={busy}
+            onClick={() => { store.refresh() }}>
+            {busy ? t('refreshing') : t('refresh')}
+          </Button>
+          <Button variant="primary" size="sm" icon={<IconPlusOutlineRegular size={14} />} onClick={() => { openEditor(undefined) }}>
+            {t('add')}
+          </Button>
         </div>
       </header>
-      <label style={searchLabelStyle}>
-        <span style={fieldLabelStyle}>{t('search')}</span>
-        <Input className={FILL} type="search" value={query} onChange={event => setQuery(event.currentTarget.value)} placeholder={t('searchHint')} />
-      </label>
-      {snapshot !== undefined && (snapshot.workspaces ?? []).length > 0 ? <label style={searchLabelStyle}>
-        <span style={fieldLabelStyle}>{t('project')}</span>
-        {/* A native `select` on purpose: the workspace list is open-ended, and
-            the primitives offer only a fixed-option `SegmentedControl`. */}
-        <select
-          data-mcp-project=""
-          style={selectStyle}
-          value={projectPath ?? ''}
-          onChange={event => store.selectProject(event.currentTarget.value === '' ? undefined : event.currentTarget.value)}
-        >
-          <option value="">{t('projectNone')}</option>
-          {(snapshot.workspaces ?? []).map(workspace => <option key={workspace.id} value={workspace.path}>{workspace.title} — {workspace.path}</option>)}
-        </select>
-        {projectPath !== undefined ? <p style={hintStyle}>{t('projectHint')}</p> : null}
-      </label> : null}
-      {snapshot !== undefined ? <details style={readonlyDetailsStyle} data-mcp-sources="">
-        <summary style={summaryStyle}>{t('sources')} ({(snapshot.sources ?? []).length})</summary>
-        {(snapshot.sources ?? []).map(source => <div key={`${source.scope}:${source.path}`} style={readonlyItemStyle} data-mcp-source={source.scope}>
-          <div style={readonlyHeaderRowStyle}>
-            <Tag tone="outline">{t(SCOPE_KEYS[source.scope])}{source.compat ? ` · ${t('sourceCompat')}` : ''}</Tag>
-            <code style={codeCaptionStyle}>{source.path}</code>
-            <span style={tagRailStyle}><Tag tone="neutral">{source.serverCount} {t('serverCount')}</Tag></span>
-            <span style={readonlyStatusStyle}>{source.exists ? (source.writable ? t('sourceWritable') : t('sourceReadonly')) : t('sourceMissing')}</span>
-          </div>
-          {source.error !== undefined ? <p role="alert" style={errorBoxStyle}>{source.error}</p> : null}
-          {source.problems !== undefined ? source.problems.map(problem =>
-            <p key={problem.id} role="alert" style={errorBoxStyle}>{problem.id}: {problem.error}</p>) : null}
-        </div>)}
-      </details> : null}
-      {message !== undefined ? <p role={isConflictMessage ? 'status' : 'alert'} style={isConflictMessage ? noticeBoxStyle : errorBoxStyle}>
-        {message}
-        {isConflictMessage ? <Button variant="outline" style={{ marginInlineStart: 8 }} onClick={rebase}>{t('rebase')}</Button> : null}
-        {!isConflictMessage ? <Button variant="ghost" style={{ marginInlineStart: 8 }} onClick={() => store.clearMessage()} aria-label={t('dismiss')}>✕</Button> : null}
-      </p> : null}
-      {pollFailed && view.status === 'ready' ? <p role="status" style={noticeBoxStyle}>{t('pollFailed')}</p> : null}
-      {view.status === 'loading' ? <p role="status" style={statusTextStyle}>{t('loading')}</p> : null}
-      {view.status === 'error' ? <p role="alert" style={errorBoxStyle}>{view.error}</p> : null}
-      {snapshot !== undefined && servers.length === 0 ? <p style={emptyStateStyle}>{snapshot.servers.length === 0 ? t('noServers') : t('empty')}</p> : null}
-      {servers.map(server => (
-        <ServerCard
-          key={server.id}
-          server={server}
-          tools={tools.filter(tool => tool.serverId === server.id)}
-          t={t}
-          busy={busy}
-          writable={canWrite(server.scope)}
-          onEdit={() => setDraft(draftFromServer(server, defaultScope))}
-          onToggle={() => { toggleServer(server) }}
-          onReload={() => { reload(server) }}
-          onRemove={() => { askRemove(server) }}
-          onMigrate={() => { migrate(server) }}
-          onToolToggle={(tool, enabled) => { toggleTool(server, tool, enabled) }}
-        />
-      ))}
-      {draft !== undefined ? (
-         <form onSubmit={event => { void save(event) }} style={cardStyle}>
-          <h3 style={formTitleStyle}>{draft.id.length > 0 && snapshot?.servers.some(server => server.id === draft.id) ? t('edit') : t('add')}</h3>
-          <fieldset style={fieldsetStyle}>
-            <legend style={legendStyle}>{t('basic')}</legend>
-            <Field label={t('id')}><Input className={FILL} required pattern={SERVER_ID_PATTERN} value={draft.id} disabled={snapshot?.servers.some(server => server.id === draft.id)} onChange={event => setDraft({ ...draft, id: event.currentTarget.value })} /></Field>
-            <Field label={t('label')}><Input className={FILL} value={draft.label} onChange={event => setDraft({ ...draft, label: event.currentTarget.value })} /></Field>
-            <FieldGroup label={t('scope')}>
-              {/* A segmented control shows every scope at once, which is the
-                  point of a multi-scope store: the ones that cannot take the
-                  write are visible and disabled, with the reason on hover. */}
-              <span data-mcp-scope-select={draft.scope}>
-                <SegmentedControl
-                  id="mcp-scope"
-                  label={t('scope')}
-                  value={draft.scope}
-                  options={SCOPE_OPTIONS.map(scope => ({
-                    value: scope,
-                    label: t(SCOPE_KEYS[scope]),
-                    disabled: (scope === 'project' && projectPath === undefined) || (scope === 'entry' && !entryView.available),
-                    title: scope === 'project' && projectPath === undefined ? t('projectHint') : undefined,
-                  }))}
-                  onChange={scope => setDraft({ ...draft, scope })}
-                />
-              </span>
-            </FieldGroup>
-            <FieldGroup label={t('transport')}>
-              <SegmentedControl
-                id="mcp-transport"
-                label={t('transport')}
-                value={draft.transport}
-                options={TRANSPORT_OPTIONS.map(option => ({ ...option, label: t(option.label) }))}
-                onChange={transport => setDraft({ ...draft, transport })}
-              />
-            </FieldGroup>
-            {draft.transport === 'stdio' ? <>
-              <Field label={t('command')}><textarea style={textareaStyle} rows={2} required value={draft.command} onChange={event => setDraft({ ...draft, command: event.currentTarget.value })} /></Field>
-              <ArgsFields entries={draft.args} t={t} onChange={args => setDraft({ ...draft, args })} />
-              <Field label={t('cwd')}><Input className={FILL} value={draft.cwd} onChange={event => setDraft({ ...draft, cwd: event.currentTarget.value })} /></Field>
-              <SecretFields label={t('environment')} entries={draft.env} t={t} onChange={env => setDraft({ ...draft, env })} />
-            </> : <>
-              <Field label={t('url')}><Input className={FILL} type="url" required value={draft.url} onChange={event => setDraft({ ...draft, url: event.currentTarget.value })} /></Field>
-              <SecretFields label={t('headers')} entries={draft.headers} t={t} onChange={headers => setDraft({ ...draft, headers })} />
-            </>}
-          </fieldset>
-          <fieldset style={fieldsetStyle}>
-            <legend style={legendStyle}>{t('advanced')}</legend>
-            <div style={formGridStyle}>
-              <Field label={t('timeout')} style={gridFieldStyle}><Input className={FILL} type="number" min={1} step={1} value={draft.timeout} onChange={event => setDraft({ ...draft, timeout: event.currentTarget.value })} /></Field>
-            </div>
-            <details style={collapseStyle}>
-              <summary style={summaryStyle}>{t('reconnect')}</summary>
-              {/* `Switch` renders an accessible `role="switch"` button that
-                  owns its own `aria-label`, so the row draws the visible copy
-                  beside it rather than nesting a control in a label. */}
-              <div style={checkRowStyle}>
-                <Switch checked={draft.reconnectEnabled} label={t('reconnectEnabled')} onChange={next => setDraft({ ...draft, reconnectEnabled: next })} />
-                <span>{t('reconnectEnabled')}</span>
-              </div>
-              <div style={formGridStyle}>
-                <Field label={t('initialDelay')} style={gridFieldStyle}><Input className={FILL} type="number" min={1} step={1} value={draft.initialDelayMs} onChange={event => setDraft({ ...draft, initialDelayMs: event.currentTarget.value })} /></Field>
-                <Field label={t('maxDelay')} style={gridFieldStyle}><Input className={FILL} type="number" min={1} step={1} value={draft.maxDelayMs} onChange={event => setDraft({ ...draft, maxDelayMs: event.currentTarget.value })} /></Field>
-                <Field label={t('maxAttempts')} style={gridFieldStyle}><Input className={FILL} type="number" min={1} step={1} value={draft.maxAttempts} onChange={event => setDraft({ ...draft, maxAttempts: event.currentTarget.value })} /></Field>
-              </div>
-            </details>
-          </fieldset>
-          <div style={formActionsStyle}>
-            <Button type="submit" variant="primary" disabled={busy || !canWrite(draft.scope)}>{t('save')}</Button>
-            <Button variant="outline" onClick={() => setDraft(undefined)} disabled={busy}>{t('cancel')}</Button>
-          </div>
-        </form>
+
+      {state.streamFailed ? (
+        <div className={cx('dsh-mcp-banner')} data-tone="warning" role="status">
+          <span className={cx('dsh-mcp-banner-text')}>{t('error.stream')}</span>
+        </div>
       ) : null}
-      {snapshot !== undefined && snapshot.readonlyEntries.length > 0 ? (
-        <details style={readonlyDetailsStyle}>
-          <summary style={summaryStyle}>{t('readonly')}</summary>
-          <p style={hintStyle}>{t('readOnlyHint')}</p>
-          <ul style={listStyle}>{snapshot.readonlyEntries.map(entry => <li key={entry.entryId} style={readonlyItemStyle}>
-            <div style={readonlyHeaderRowStyle}>
-              <Tag tone={entry.source === 'loader' ? 'neutral' : 'info'}>{entry.source === 'loader' ? t('sourceLoader') : `${t('sourcePreset')}: ${entry.sourceName ?? entry.sourceId ?? '—'}`}</Tag>
-              <code style={codeStyle}>{entry.entryId}</code>
-              <code style={codeCaptionStyle}>{entry.moduleName}</code>
-            </div>
-            <p style={readonlyStatusStyle}>{t('status')}: {entry.enabled === 'conditional' ? t('conditional') : entry.enabled ? t('enabled') : t('disabled')} ({entry.fiberPhase ?? '—'})</p>
-          </li>)}</ul>
+      {state.pollFailed ? (
+        <div className={cx('dsh-mcp-banner')} data-tone="warning" role="status">
+          <span className={cx('dsh-mcp-banner-text')}>{t('error.snapshot', { message: state.error ?? '' })}</span>
+        </div>
+      ) : null}
+      {state.upstream.status === 'unavailable' ? (
+        <div className={cx('dsh-mcp-banner')} data-tone="warning">
+          <span className={cx('dsh-mcp-banner-text')}>{t('error.upstream')}</span>
+        </div>
+      ) : null}
+      {state.notice !== undefined ? (
+        <div className={cx('dsh-mcp-banner')} data-tone={state.notice.tone === 'error' ? 'error' : 'success'} role={state.notice.tone === 'error' ? 'alert' : 'status'}>
+          <span className={cx('dsh-mcp-banner-text')}>{state.notice.text}</span>
+          <span className={cx('dsh-mcp-banner-close')}>
+            <Button variant="ghost" size="sm" onClick={() => { store.clearNotice() }}>{t('close')}</Button>
+          </span>
+        </div>
+      ) : null}
+
+      <div className={cx('dsh-mcp-toolbar')}>
+        <div className={cx('dsh-mcp-search')}>
+          <Input type="search" value={search} placeholder={t('filter.searchPlaceholder')} aria-label={t('filter.search')}
+            onChange={(event) => { setSearch(event.target.value) }} />
+        </div>
+        <SegmentedControl id="dsh-mcp-source" label={t('filter.source')} value={source}
+          options={[
+            { value: 'all', label: t('filter.all') },
+            { value: 'entry', label: t('source.entry') },
+            { value: 'file', label: t('source.file') },
+          ]}
+          onChange={next => { setSource(next) }} />
+        <SegmentedControl id="dsh-mcp-status" label={t('filter.status')} value={status}
+          options={[
+            { value: 'all', label: t('filter.all') },
+            { value: 'connected', label: t('status.connected') },
+            { value: 'busy', label: t('status.connecting') },
+            { value: 'attention', label: t('filter.attention') },
+            { value: 'disabled', label: t('status.disabled') },
+          ]}
+          onChange={next => { setStatus(next) }} />
+        {workspaces.length > 0 ? (
+          <label className={cx('dsh-mcp-project')}>
+            <span>{t('scope.project')}</span>
+            <select value={state.projectPath ?? ''} disabled={busy}
+              onChange={(event) => { store.selectProject(event.target.value === '' ? undefined : event.target.value) }}>
+              <option value="">{t('none')}</option>
+              {workspaces.map(workspace => (
+                <option key={workspace.path} value={workspace.path}>{workspace.title ?? workspace.path}</option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+      </div>
+
+      <div className={cx('dsh-mcp-summary')}>
+        <span className={cx('dsh-mcp-summary-chip')}><StateDot state="done" size={8} />{t('summary.connected', { count: counts.connected })}</span>
+        <span className={cx('dsh-mcp-summary-chip')}><StateDot state="ongoing" size={8} />{t('summary.busy', { count: counts.busy })}</span>
+        <span className={cx('dsh-mcp-summary-chip')}><StateDot state="warning" size={8} />{t('summary.attention', { count: counts.attention })}</span>
+        <span className={cx('dsh-mcp-summary-chip')}><StateDot state="idle" size={8} />{t('summary.disabled', { count: counts.disabled })}</span>
+        <span className={cx('dsh-mcp-summary-total')}>{t('count', { count: counts.total })}</span>
+      </div>
+
+      {state.status === 'error' ? (
+        <div className={cx('dsh-mcp-empty')}>
+          <strong>{t('error.snapshot', { message: state.error ?? '' })}</strong>
+          <Button variant="outline" onClick={() => { store.refresh() }}>{t('retry')}</Button>
+        </div>
+      ) : null}
+
+      {state.status === 'loading' ? <div className={cx('dsh-mcp-loading')}>{t('loading.servers')}</div> : null}
+
+      {state.status === 'ready' && rows.length === 0 ? (
+        <div className={cx('dsh-mcp-empty')}>
+          <strong>{t('empty.title')}</strong>
+          <span>{all.length === 0 ? t('empty.description') : t('filter.search')}</span>
+          <Button variant="primary" size="sm" icon={<IconPlusOutlineRegular size={14} />} onClick={() => { openEditor(undefined) }}>
+            {all.length === 0 ? t('empty.action') : t('add')}
+          </Button>
+        </div>
+      ) : null}
+
+      <div className={cx('dsh-mcp-list')}>
+        {rows.map(row => (
+          <ServerCard
+            key={`${row.kind}:${row.name}`}
+            row={row}
+            t={t}
+            busy={busy}
+            onToggle={(target, enabled) => { void store.setEnabled(target, enabled) }}
+            onEdit={target => { openEditor(target) }}
+            onDelete={beginDelete}
+            onRestart={target => { void store.restart(target.name) }}
+            onProbe={target => { setProbe(target.name) }}
+            onAuthorize={target => { setOauth(target.name) }}
+            onSignOut={target => { void store.signOut(target.name) }}
+            onToolToggle={(target, tool, enabled) => { void store.setToolEnabled(target.name, tool, enabled) }}
+            onCopy={target => {
+              void copyText(rowToJson(target)).then((copied) => { store.notify(t(copied ? 'notice.copied' : 'notice.copyFailed'), copied ? 'success' : 'error') })
+            }}
+          />
+        ))}
+      </div>
+
+      {sources.length > 0 ? (
+        <details className={cx('dsh-mcp-sources')}>
+          <summary>{t('sources.title')}</summary>
+          <div className={cx('dsh-mcp-sources-body')}>
+            <p className={cx('dsh-mcp-note')}>{t('sources.hint')}</p>
+            {sources.map(file => (
+              <div key={`${file.scope}:${file.path}`} className={cx('dsh-mcp-source-row')}>
+                <Tag tone={file.compat ? 'warning' : 'outline'}>{scopeLabel(file.scope, t)}</Tag>
+                <code>{file.path}</code>
+                <span className={cx('dsh-mcp-tag-note')}>
+                  {file.exists ? (file.writable ? t('sources.writable') : t('sources.readonly')) : t('sources.missing')}
+                  {' · '}
+                  {t('sources.count', { count: file.serverCount })}
+                </span>
+              </div>
+            ))}
+          </div>
         </details>
       ) : null}
-      {/* Deleting a definition also drops its per-tool policy, with no undo, so
-          the official acknowledgement dialog stands in front of it. */}
-      {pendingRemove !== undefined ? <RiskConfirmation
-        open
-        title={t('removeTitle')}
-        description={`${t('removeDescription')} ${pendingRemove.label} (${pendingRemove.id})`}
-        acknowledgeLabel={t('removeAcknowledge')}
-        cancelLabel={t('cancel')}
-        closeLabel={t('dismiss')}
-        confirmLabel={t('confirm')}
+
+      <p className={cx('dsh-mcp-note')}>{t('panel.toolsNote')}</p>
+
+      {editor !== undefined ? (
+        <Modal open onClose={() => { setEditor(undefined) }} closeLabel={t('close')}
+          title={editor.row === undefined ? t('editor.new') : t('editor.edit', { name: editor.row.name })}>
+          <ServerEditor
+            key={`${editor.row?.kind ?? 'new'}:${editor.row?.name ?? 'new'}`}
+            row={editor.row}
+            draft={editor.draft}
+            busy={busy}
+            entryWritable={entryWritable}
+            hasWorkspace={workspaces.length > 0}
+            hasProjectSelection={state.projectPath !== undefined}
+            t={t}
+            onClose={() => { setEditor(undefined) }}
+            onSave={saveEditor}
+          />
+        </Modal>
+      ) : null}
+
+      {probe !== undefined ? (
+        <ProbeDialog key={probe} name={probe} t={t} onClose={() => { setProbe(undefined) }} run={name => store.probe(name)} />
+      ) : null}
+
+      {oauthName !== undefined ? (
+        <OAuthDialog key={oauthName} name={oauthName} t={t} connected={oauthRow?.runtime?.status.state === 'connected'}
+          onClose={() => { setOauth(undefined) }}
+          start={() => store.authorize(oauthName)}
+          cancel={id => store.cancelAuthorization(oauthName, id)}
+          signOut={() => store.signOut(oauthName)} />
+      ) : null}
+
+      <RiskConfirmation
+        open={deleteOpen}
+        title={t('confirm.deleteTitle')}
+        description={deleting === undefined ? '' : t('confirm.deleteDescription', { name: deleting.name })}
+        acknowledgeLabel={t('confirm.acknowledge')}
+        cancelLabel={t('confirm.cancel')}
+        closeLabel={t('close')}
+        confirmLabel={t('confirm.delete')}
         acknowledged={acknowledged}
         disabled={busy}
         onAcknowledgedChange={setAcknowledged}
-        onCancel={() => setPendingRemove(undefined)}
-        onConfirm={() => {
-          const target = pendingRemove
-          setPendingRemove(undefined)
-          remove(target)
-        }}
-      /> : null}
+        onCancel={() => { setDeleting(undefined) }}
+        onConfirm={confirmDelete}
+      />
     </section>
   )
 }
 
-function Field({ label, children, style }: { label: string; children: ReactNode; style?: React.CSSProperties }): ReactNode {
-  return <label style={{ display: 'block', marginBlock: 8, ...style }}><span style={fieldLabelStyle}>{label}</span>{children}</label>
+function scopeLabel(scope: McpScope, t: (key: McpLocaleKey) => string): string {
+  switch (scope) {
+    case 'project': return t('scope.project')
+    case 'profile': return t('scope.profile')
+    case 'user': return t('scope.user')
+  }
 }
-
-/**
- * One labelled row for a control that is not a single labelable element.
- *
- * `<label>` associates with exactly one form control, so wrapping a segmented
- * control in one both mis-states the markup and strips the accessible name
- * from each of its segments. A grouped control gets this `<div>` row instead.
- */
-function FieldGroup({ label, children, style }: { label: string; children: ReactNode; style?: React.CSSProperties }): ReactNode {
-  return <div style={{ display: 'block', marginBlock: 8, ...style }}>
-    <span style={fieldLabelStyle}>{label}</span>
-    {children}
-  </div>
-}
-
-interface SecretFieldsProps {
-  label: string
-  entries: readonly SecretDraft[]
-  t: McpSectionProps['t']
-  onChange: (entries: SecretDraft[]) => void
-}
-
-function SecretFields({ label, entries, t, onChange }: SecretFieldsProps): ReactNode {
-  return <fieldset style={groupFieldsetStyle}>
-    <legend style={legendStyle}>{label}</legend>
-    <p style={hintStyle}>{t('secretHint')}</p>
-    {entries.map((entry, index) => entry.templated
-      // A `${...}` template lives in the file and is resolved by the Host at
-      // mount time; the panel never received its value and must not rewrite it.
-      ? <div key={entry.uid} style={secretRowStyle} data-mcp-template={entry.key}>
-        <Field label={t('secretKey')} style={secretFieldStyle}><Input className={FILL} value={entry.key} readOnly /></Field>
-        <p style={hintStyle} data-mcp-template-hint="">{t('secretTemplate')}</p>
-      </div>
-      : <div key={entry.uid} style={secretRowStyle}>
-      <Field label={t('secretKey')} style={secretFieldStyle}><Input className={FILL} value={entry.key} onChange={event => {
-        const next = [...entries]
-        next[index] = { ...entry, key: event.currentTarget.value }
-        onChange(next)
-      }} /></Field>
-      <Field label={t('secretValue')} style={secretFieldStyle}><Input className={FILL} type={entry.sensitive ? 'password' : 'text'} value={entry.value} disabled={entry.clear} placeholder={entry.clear ? t('secretUnset') : undefined} onChange={event => {
-        const next = [...entries]
-        next[index] = { ...entry, value: event.currentTarget.value }
-        onChange(next)
-      }} /></Field>
-      <div style={secretActionsStyle}>
-        <Checkbox label={t('sensitive')} checked={entry.sensitive} onChange={next => {
-          const updated = [...entries]
-          updated[index] = { ...entry, sensitive: next }
-          onChange(updated)
-        }} />
-        <Checkbox label={t('secretUnset')} checked={entry.clear} onChange={next => {
-          const updated = [...entries]
-          updated[index] = { ...entry, clear: next }
-          onChange(updated)
-        }} />
-        <Button variant="outline" data-mcp-danger="" onClick={() => onChange(entries.filter((_, itemIndex) => itemIndex !== index))}>{t('remove')}</Button>
-      </div>
-    </div>)}
-    <Button variant="outline" onClick={() => onChange([...entries, newSecretDraft()])}>{t('addEntry')}</Button>
-  </fieldset>
-}
-
-/** Lossless per-row argument editor: values are saved verbatim (no trim/filter). */
-function ArgsFields({ entries, t, onChange }: { entries: readonly string[]; t: McpSectionProps['t']; onChange: (entries: string[]) => void }): ReactNode {
-  return <fieldset style={groupFieldsetStyle}>
-    <legend style={legendStyle}>{t('args')}</legend>
-    <p style={hintStyle}>{t('argsHint')}</p>
-    {entries.map((value, index) => <div key={index} style={secretRowStyle}>
-      <Field label={`${t('argument')} ${index + 1}`} style={secretFieldStyle}>
-        <Input className={FILL} value={value} onChange={event => {
-          const next = [...entries]
-          next[index] = event.currentTarget.value
-          onChange(next)
-        }} />
-      </Field>
-      <div style={secretActionsStyle}>
-        <Button variant="outline" data-mcp-danger="" onClick={() => onChange(entries.filter((_, itemIndex) => itemIndex !== index))}>{t('remove')}</Button>
-      </div>
-    </div>)}
-    <Button variant="outline" onClick={() => onChange([...entries, ''])}>{t('addEntry')}</Button>
-  </fieldset>
-}
-
-interface ServerCardProps {
-  server: ManagedServerView
-  tools: readonly ManagedToolView[]
-  t: McpSectionProps['t']
-  busy: boolean
-  writable: boolean
-  onEdit: () => void
-  onToggle: () => void
-  onReload: () => void
-  onRemove: () => void
-  onMigrate: () => void
-  onToolToggle: (tool: ManagedToolView, enabled: boolean) => void
-}
-
-function ServerCard({ server, tools, t, busy, writable, onEdit, onToggle, onReload, onRemove, onMigrate, onToolToggle }: ServerCardProps): ReactNode {
-  const target = server.transport === 'stdio' ? server.command : server.url
-  return <article data-mcp-server={server.id} style={cardStyle}>
-    <div style={cardHeaderRowStyle}>
-      <Tag tone={TAG_TONES[server.status]}>
-        <span data-mcp-status={server.status} style={statusBadgeStyle}>
-          <StateDot state={DOT_STATES[server.status]} size={6} />
-          {t(STATUS_KEYS[server.status])}
-        </span>
-      </Tag>
-      <strong style={cardTitleStyle}>{server.label}</strong>
-      <code style={codeCaptionStyle}>{server.id}</code>
-      <span data-mcp-scope={server.scope} style={metaTagStyle}><Tag tone="neutral">{t(SCOPE_KEYS[server.scope])}</Tag></span>
-      {server.shadowed.length > 0
-        ? <span data-mcp-shadowed={server.shadowed.join(',')} style={metaTagStyle} title={server.shadowed.map(scope => t(SCOPE_KEYS[scope])).join(', ')}><Tag tone="warning">{t('shadowed')}</Tag></span>
-        : null}
-      <span style={tagRailStyle}><Tag tone="outline">{server.toolCount} {t('toolCount')}</Tag></span>
-    </div>
-    <div style={metaLineStyle}>
-      <Tag tone="quiet">{server.transport === 'stdio' ? t('stdio') : t('http')}</Tag>
-      <code style={metaCodeStyle} title={target}>{target}</code>
-    </div>
-    {server.error !== undefined ? <p role="alert" style={errorBoxStyle}>{server.error}</p> : null}
-    <div style={actionsRowStyle}>
-      <Button variant="primary" onClick={onEdit} disabled={busy || !writable}>{t('edit')}</Button>
-      <Button variant="outline" onClick={onToggle} disabled={busy || !writable}>{server.enabled ? t('disable') : t('enable')}</Button>
-      <Button variant="outline" onClick={onReload} disabled={busy}>{t('reload')}</Button>
-      {server.scope === 'entry'
-        ? <Button variant="outline" onClick={onMigrate} disabled={busy || !writable}>{t('migrate')}</Button>
-        : null}
-      <Button variant="outline" data-mcp-danger="" style={tagRailStyle} onClick={onRemove} disabled={busy || !writable}>{t('remove')}</Button>
-    </div>
-    <details style={collapseStyle}>
-      <summary style={summaryStyle}>{t('tools')} ({tools.length})</summary>
-      {tools.length === 0 ? <p style={statusTextStyle}>{t('noTools')}</p> : <ul style={listStyle}>{tools.map(tool => <li key={tool.name} style={toolItemStyle}>
-        <div style={toolRowStyle}>
-          <Checkbox label={tool.name} checked={tool.enabled} onChange={next => onToolToggle(tool, next)} disabled={busy || !writable} />
-          <code style={codeStyle}>{tool.name}</code>
-          <span style={toolDescriptionStyle}>{tool.description}</span>
-        </div>
-        <details style={paramDetailsStyle}>
-          <summary style={summaryStyle}>JSON {t('params')}</summary>
-          <pre style={preStyle}>{JSON.stringify(tool.parameters, null, 2)}</pre>
-        </details>
-      </li>)}</ul>}
-      {Object.entries(server.env).map(([key, value]) => <span key={key} data-mcp-secret={key} hidden>{value.set ? t('secretSet') : t('secretUnset')}</span>)}
-    </details>
-  </article>
-}
-
-export type { SecretInput }

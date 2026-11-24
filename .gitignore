@@ -4,3 +4,13 @@ pnpm-debug.log*
 *.tgz
 *.tsbuildinfo
 .codebase-memory/
+
+# agent scratch (workspace-local pnpm store/cache and temporary probes)
+.pnpmcache/
+.pnpmstore/
+.xrun/
+.tmpinstall/
+.tmpresearch/
+.preview-cache/
+
+.vite-preview-cache/

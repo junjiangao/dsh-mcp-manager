@@ -1,357 +1,215 @@
 // @vitest-environment jsdom
 
 import * as React from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ManagedServerView, Snapshot } from '../src/types.ts'
+import type { Context } from '@deepseek-ai/cordis'
+import type { Snapshot } from '../src/types.ts'
+import type { EntryServer } from '../src/client/summary.ts'
 import { McpSection, type McpSectionProps } from '../src/client/McpSection.tsx'
-import type { ManagerClientApi } from '../src/client/api.ts'
-import type { EntryFormFace } from '../src/client/entry-form.ts'
 import { createManagerStore, type ManagerStore } from '../src/client/manager-store.ts'
+import type { ManagerClientApi } from '../src/client/api.ts'
+import type { UpstreamFormFace } from '../src/client/entry-form.ts'
 
-function view(overrides: Partial<ManagedServerView> = {}): ManagedServerView {
+const t = ((key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key}:${Object.values(params).join(',')}`) as McpSectionProps['t']
+
+function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
+  return { writable: true, servers: [], tools: [], sources: [], workspaces: [], ...overrides }
+}
+
+function fileServer(overrides: Partial<Snapshot['servers'][number]> = {}): Snapshot['servers'][number] {
   return {
-    id: 'demo',
-    label: 'Demo',
-    enabled: true,
-    transport: 'stdio',
-    command: 'node',
-    args: [],
-    cwd: '',
-    url: '',
-    env: {},
-    headers: {},
-    toolCallTimeoutMs: 60_000,
-    reconnect: { enabled: true, initialDelayMs: 500, maxDelayMs: 30_000, maxAttempts: 10 },
-    status: 'loaded',
-    toolCount: 0,
-    scope: 'profile',
-    shadowed: [],
-    templates: { env: [], headers: [] },
+    id: 'demo', label: 'demo', enabled: true, transport: 'stdio', command: 'node', args: [], cwd: '', url: '',
+    env: { TOKEN: { set: true, sensitive: true, template: false, credential: false } }, headers: {},
+    toolCallTimeoutMs: 60_000, startupTimeoutMs: 30_000, closeTimeoutMs: 5_000,
+    reconnect: { enabled: true, initialDelayMs: 500, maxDelayMs: 30_000, maxAttempts: 10 }, toolLoading: 'eager',
+    scope: 'profile', path: '/p/mcp.json', writable: true, shadowed: [], templates: { env: [], headers: [], credentials: [] },
+    registration: { state: 'registered' },
     ...overrides,
   }
 }
 
-function snapshot(servers: ManagedServerView[] = [], tools: Snapshot['tools'] = []): Snapshot {
-  return { writable: true, servers, tools, readonlyEntries: [], sources: [], workspaces: [] }
-}
-
-function makeApi(): ManagerClientApi {
+function api(snap: () => Promise<Snapshot>): ManagerClientApi {
   return {
-    snapshot: vi.fn(),
-    upsertServer: vi.fn(),
-    removeServer: vi.fn(),
-    setServerEnabled: vi.fn(),
-    reloadServer: vi.fn(),
+    snapshot: vi.fn(snap),
+    upsertServer: vi.fn(async () => snapshot()),
+    removeServer: vi.fn(async () => snapshot()),
+    setServerEnabled: vi.fn(async () => snapshot()),
+    authorize: vi.fn(async () => ({ id: 'a', phase: 'waiting-browser' as const })),
+    cancelAuthorization: vi.fn(async () => null),
+    signOut: vi.fn(async () => null),
   } as unknown as ManagerClientApi
 }
 
-let api: ManagerClientApi
-let entry: EntryFormFace
-let store: ManagerStore
-
-const t = ((key: string) => key) as unknown as McpSectionProps['t']
-
-/**
- * The panel's two write layers are injected separately: its own RPC and the
- * official shared settings form. The form's view object is created once so
- * `useSyncExternalStore` sees a stable reference, exactly as the real form's
- * `getSnapshot()` contract promises.
- */
-function renderPanel(entryView: { available: boolean; writable: boolean } = { available: true, writable: true }): { container: HTMLElement } {
-  const panelEntryView = entryView
-  entry = {
-    snapshot: () => panelEntryView,
-    subscribe: () => () => {},
-    upsert: vi.fn(async () => true),
-    remove: vi.fn(async () => true),
-    setEnabled: vi.fn(async () => true),
-    setDisabledTools: vi.fn(async () => true),
+function streamHandle(): { [Symbol.asyncIterator](): { next(): Promise<IteratorResult<never>>; return(): Promise<IteratorResult<never>> }; dispose(): void } {
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next: () => new Promise<never>(() => {}),
+      return: () => Promise.resolve({ done: true as const, value: undefined as never }),
+    }),
+    dispose: () => {},
   }
-  // The real store over a fake transport: the read rule under test is the
-  // store's, and `manager-store.spec.ts` covers it directly.
-  store = createManagerStore(api)
-  return render(<McpSection api={api} entry={entry} store={store} t={t} />)
 }
 
-async function openEditor(server = view()): Promise<{ container: HTMLElement }> {
-  api.snapshot.mockResolvedValue(snapshot([server]))
-  const rendered = renderPanel()
-  await waitFor(() => expect(screen.getByText('edit')).toBeTruthy())
-  fireEvent.click(screen.getByText('edit'))
-  await waitFor(() => expect(rendered.container.querySelector('form')).not.toBeNull())
-  return rendered
+function storeOf(client: ManagerClientApi, forms: { upstream: UpstreamFormFace; own: { setDisabledTools: (name: string, tools: readonly string[]) => Promise<boolean> } }): ManagerStore {
+  const handle = streamHandle()
+  const ctx = {
+    remote: {
+      $stream: (options: { open(signal: AbortSignal): typeof handle }) => options.open(new AbortController().signal),
+      mcpManager: {
+        watch: () => handle,
+        restart: async () => ({ ok: true }),
+        probe: async () => ({ ok: true, value: { ok: true, toolNames: ['mcp__demo__read'], truncated: false, durationMs: 4, closeConfirmed: true } }),
+      },
+    },
+    on: () => () => {},
+    get: () => undefined,
+    logger: { warn: () => {} },
+  } as unknown as Context
+  const ownFace = {
+    namespace: 'dsh-mcp-manager',
+    snapshot: () => ({ status: 'ready' as const, writable: true, revision: 1, value: { disabledTools: {} } }),
+    subscribe: () => () => {},
+    setDisabledTools: forms.own.setDisabledTools,
+  }
+  return createManagerStore(ctx, client, forms.upstream, ownFace, t)
 }
 
+function makeForms(servers: Record<string, EntryServer> = {}): {
+  upstream: UpstreamFormFace
+  own: { setDisabledTools: ReturnType<typeof vi.fn> }
+  setServer: ReturnType<typeof vi.fn>
+} {
+  const state = { status: 'ready' as const, writable: true, revision: 1, value: { servers } }
+  const setServer = vi.fn(async () => true)
+  const removeServer = vi.fn(async () => true)
+  const setEnabled = vi.fn(async () => true)
+  return {
+    setServer,
+    upstream: {
+      namespace: 'mcp-manager',
+      snapshot: () => state,
+      subscribe: () => () => {},
+      setServer,
+      removeServer,
+      setEnabled,
+    },
+    own: { setDisabledTools: vi.fn(async () => true) },
+  }
+}
+
+let store: ManagerStore | undefined
 afterEach(() => {
   cleanup()
+  store?.dispose()
+  store = undefined
   vi.restoreAllMocks()
-  vi.useRealTimers()
 })
 
-describe('McpSection conflict-safe editing', () => {
-  it('writes an mcp.json scope through the manager RPC', async () => {
-    api = makeApi()
-    await openEditor()
-    fireEvent.change(screen.getByLabelText('label'), { target: { value: 'Renamed' } })
-    fireEvent.click(screen.getByText('save'))
-    await waitFor(() => expect(api.upsertServer).toHaveBeenCalled())
-    const request = (api.upsertServer as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]
-    expect(request.server.label).toBe('Renamed')
-    // The entry layer is not this channel's business any more.
-    expect(entry.upsert).not.toHaveBeenCalled()
+async function renderReady(client: ManagerClientApi, forms = makeForms()): Promise<ReturnType<typeof render>> {
+  store = storeOf(client, forms)
+  const view = render(<McpSection store={store} t={t} />)
+  await waitFor(() => expect(store?.state.getSnapshot().status).toBe('ready'))
+  return view
+}
+
+describe('MCP panel', () => {
+  it('shows the loading, error, and empty states', async () => {
+    const pending = api(() => new Promise<Snapshot>(() => {}))
+    store = storeOf(pending, makeForms())
+    render(<McpSection store={store} t={t} />)
+    expect(screen.getByText('loading.servers')).toBeTruthy()
+    cleanup()
+
+    const failing = api(async () => { throw new Error('boom') })
+    store?.dispose()
+    store = storeOf(failing, makeForms())
+    render(<McpSection store={store} t={t} />)
+    await waitFor(() => expect(screen.getByText(/error\.snapshot/u)).toBeTruthy())
+    cleanup()
+
+    store?.dispose()
+    store = storeOf(api(async () => snapshot()), makeForms())
+    render(<McpSection store={store} t={t} />)
+    await waitFor(() => expect(screen.getByText('empty.title')).toBeTruthy())
+    expect(screen.getByText('empty.description')).toBeTruthy()
   })
 
-  it('writes an entry-scope definition through the official settings form', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot([view({ scope: 'entry' })]))
-    const { container } = renderPanel()
-    await waitFor(() => expect(screen.getByText('edit')).toBeTruthy())
+  it('renders a file server with its status, source, and tool list', async () => {
+    const client = api(async () => snapshot({
+      servers: [fileServer()],
+      tools: [{ name: 'mcp__demo__read', serverId: 'demo', description: 'read a file', parameters: {}, enabled: true }],
+    }))
+    await renderReady(client)
+    expect(screen.getByText('demo')).toBeTruthy()
+    expect(screen.getByText('scope.profile')).toBeTruthy()
+    fireEvent.click(screen.getByText(/card\.tools/u))
+    expect(screen.getByText(/read a file/u)).toBeTruthy()
+  })
+
+  it('filters by search text and by source', async () => {
+    const client = api(async () => snapshot({ servers: [fileServer(), fileServer({ id: 'other', label: 'other' })] }))
+    await renderReady(client, makeForms({ 'entry-one': { command: 'node' } }))
+    fireEvent.change(screen.getByPlaceholderText('filter.searchPlaceholder'), { target: { value: 'other' } })
+    await waitFor(() => expect(screen.queryByText('demo')).toBeNull())
+    expect(screen.getByText('other')).toBeTruthy()
+    fireEvent.change(screen.getByPlaceholderText('filter.searchPlaceholder'), { target: { value: '' } })
+    fireEvent.click(screen.getByText('source.entry'))
+    await waitFor(() => expect(screen.queryByText('demo')).toBeNull())
+    expect(screen.getByText('entry-one')).toBeTruthy()
+  })
+
+  it('edits a file server through the Host RPC', async () => {
+    const client = api(async () => snapshot({ servers: [fileServer()] }))
+    await renderReady(client)
     fireEvent.click(screen.getByText('edit'))
-    await waitFor(() => expect(container.querySelector('form')).not.toBeNull())
-    // The segmented control marks the entry segment as the selected tab.
-    expect(container.querySelector('[data-mcp-scope-select]')?.getAttribute('data-mcp-scope-select')).toBe('entry')
-    expect(screen.getByRole('tab', { name: 'scopeEntry' }).getAttribute('aria-selected')).toBe('true')
-    fireEvent.change(screen.getByLabelText('label'), { target: { value: 'Renamed' } })
+    await waitFor(() => expect(screen.getByText(/editor\.edit/u)).toBeTruthy())
+    fireEvent.change(screen.getByLabelText(/editor\.name/u), { target: { value: 'renamed' } })
     fireEvent.click(screen.getByText('save'))
-    await waitFor(() => expect(entry.upsert).toHaveBeenCalled())
-    const patch = (entry.upsert as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]
-    expect(patch.label).toBe('Renamed')
-    expect(api.upsertServer).not.toHaveBeenCalled()
+    await waitFor(() => expect(client.upsertServer).toHaveBeenCalled())
+    const request = (client.upsertServer as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { server: { id: string } }
+    expect(request.server.id).toBe('renamed')
   })
 
-  it('reports a refused official-form write and keeps the draft for rebase', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot([view({ scope: 'entry' })]))
-    const { container } = renderPanel()
-    const refused = entry.upsert as ReturnType<typeof vi.fn>
-    await waitFor(() => expect(screen.getByText('edit')).toBeTruthy())
+  it('edits an official entry through the shared form', async () => {
+    const client = api(async () => snapshot())
+    const forms = makeForms({ 'entry-one': { command: 'node', args: ['x'] } })
+    await renderReady(client, forms)
     fireEvent.click(screen.getByText('edit'))
-    await waitFor(() => expect(container.querySelector('form')).not.toBeNull())
-    // A refusal means the Host did not accept the staged revision; the form has
-    // already reloaded its own state, and the draft stays for the user to rebase.
-    refused.mockResolvedValue(false)
-    fireEvent.change(screen.getByLabelText('label'), { target: { value: 'Renamed' } })
+    await waitFor(() => expect(screen.getByText(/editor\.edit/u)).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('editor.command'), { target: { value: 'deno' } })
     fireEvent.click(screen.getByText('save'))
-    await waitFor(() => expect(screen.getByText('conflict')).toBeTruthy())
-    expect(screen.getByText('rebase')).toBeTruthy()
-    expect(container.querySelector('form')).not.toBeNull()
-    // The message belongs to the user's last operation, so the next one clears
-    // it. That a *background* read cannot clear it is asserted against the
-    // store, where the read loop is drivable.
-    await act(async () => { await store.refresh() })
-    expect(screen.queryByText('conflict')).toBeNull()
-    expect(container.querySelector('form')).not.toBeNull()
+    await waitFor(() => expect(forms.setServer).toHaveBeenCalled())
+    expect(forms.setServer.mock.calls[0]?.[0]).toBe('entry-one')
   })
 
-  it('emits { clear: true } for env rows removed from the draft', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot([view({ env: { TOKEN: { set: true, sensitive: false } } })]))
-    ;(api.upsertServer as ReturnType<typeof vi.fn>).mockResolvedValue(snapshot([]))
-    const { container } = await openEditor(view({ env: { TOKEN: { set: true, sensitive: false } } }))
-    const form = container.querySelector('form') as HTMLElement
-    fireEvent.click(within(form).getAllByText('remove')[0] as Element)
-    fireEvent.click(within(form).getByText('save'))
-    await waitFor(() => expect(api.upsertServer).toHaveBeenCalled())
-    const request = (api.upsertServer as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]
-    expect(request.server.env.TOKEN).toEqual({ clear: true })
+  it('asks before deleting and then removes the server', async () => {
+    const client = api(async () => snapshot({ servers: [fileServer()] }))
+    await renderReady(client)
+    fireEvent.click(screen.getByText('delete'))
+    await waitFor(() => expect(screen.getByText('confirm.deleteDescription:demo')).toBeTruthy())
+    fireEvent.click(screen.getByLabelText('confirm.acknowledge'))
+    fireEvent.click(screen.getByText('confirm.delete'))
+    await waitFor(() => expect(client.removeServer).toHaveBeenCalledWith({ id: 'demo' }))
   })
 
-  it('keeps the key input mounted and focused while typing (stable row identity)', async () => {
-    api = makeApi()
-    await openEditor(view({ env: { TOKEN: { set: true, sensitive: false } } }))
-    const keyInput = screen.getByDisplayValue('TOKEN') as HTMLInputElement
-    keyInput.focus()
-    expect(document.activeElement).toBe(keyInput)
-    fireEvent.change(keyInput, { target: { value: 'TOKENX' } })
-    expect(keyInput.value).toBe('TOKENX')
-    // 稳定行 ID:键名变化不重挂载,焦点不丢
-    expect(document.activeElement).toBe(keyInput)
+  it('probes a server and shows the result', async () => {
+    const client = api(async () => snapshot({ servers: [fileServer()] }))
+    await renderReady(client)
+    fireEvent.click(screen.getByText('action.probe'))
+    await waitFor(() => expect(screen.getByText('probe.success')).toBeTruthy())
+    expect(screen.getByText(/mcp__demo__read/u)).toBeTruthy()
   })
 
-  it('renders only the newest answer when a slow read settles last', async () => {
-    api = makeApi()
-    let resolveSlow!: (value: Snapshot) => void
-    const slow = new Promise<Snapshot>(resolve => { resolveSlow = resolve })
-    ;(api.snapshot as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce(snapshot([view({ label: 'OLD' })]))
-      .mockImplementationOnce(() => slow)
-      .mockResolvedValueOnce(snapshot([view({ label: 'NEW' })]))
-    renderPanel()
-    await waitFor(() => expect(screen.getByText('OLD')).toBeTruthy())
-    // Two overlapping reads; the second publishes, then the first settles late.
-    const stale = store.refresh()
-    await store.refresh()
-    await waitFor(() => expect(screen.getByText('NEW')).toBeTruthy())
-    await act(async () => { resolveSlow(snapshot([view({ label: 'OLD' })])); await stale })
-    expect(screen.queryByText('OLD')).toBeNull()
-    expect(screen.getByText('NEW')).toBeTruthy()
-  })
-
-  it('labels the lifecycle button with the action instead of the current state', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot([view({ enabled: true, status: 'loaded' })]))
-    const running = renderPanel()
-    await waitFor(() => expect(screen.getByText('disable')).toBeTruthy())
-    // 状态由徽章表达,按钮只表达动作,避免“已加载 + 已停用”这类自相矛盾的文案
-    expect(screen.getByText('loaded')).toBeTruthy()
-    expect(screen.queryByText('enabled')).toBeNull()
-    running.container.remove()
-
-    api.snapshot.mockResolvedValue(snapshot([view({ enabled: false, status: 'disabled' })]))
-    renderPanel()
-    await waitFor(() => expect(screen.getByText('enable')).toBeTruthy())
-    expect(screen.getByText('disabled')).toBeTruthy()
-  })
-})
-
-describe('McpSection write routing', () => {
-  it('flips an entry-scope server through the settings form, not the RPC', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot([view({ scope: 'entry', enabled: true })]))
-    renderPanel()
-    await waitFor(() => expect(screen.getByText('disable')).toBeTruthy())
-    fireEvent.click(screen.getByText('disable'))
-    await waitFor(() => expect(entry.setEnabled).toHaveBeenCalledWith('demo', false))
-    expect(api.setServerEnabled).not.toHaveBeenCalled()
-  })
-
-  it('flips a file-scope server through the RPC', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot([view({ scope: 'profile', enabled: true })]))
-    renderPanel()
-    await waitFor(() => expect(screen.getByText('disable')).toBeTruthy())
-    fireEvent.click(screen.getByText('disable'))
-    await waitFor(() => expect(api.setServerEnabled).toHaveBeenCalled())
-    expect(entry.setEnabled).not.toHaveBeenCalled()
-  })
-
-  it('routes the per-tool policy through the settings form for every scope', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot(
-      [view({ scope: 'profile' })],
-      [
-        { name: 'mcp__demo__one', serverId: 'demo', description: '', parameters: {}, enabled: true },
-        { name: 'mcp__demo__two', serverId: 'demo', description: '', parameters: {}, enabled: false },
-      ],
-    ))
-    renderPanel()
-    await waitFor(() => expect(screen.getByText('tools (2)')).toBeTruthy())
-    fireEvent.click(screen.getByText('tools (2)'))
-    // `disabledTools` lives in the entry document whatever scope the definition
-    // came from, so the toggle is an official-form write either way.
-    fireEvent.click(screen.getByLabelText(/mcp__demo__one/u))
-    await waitFor(() => expect(entry.setDisabledTools).toHaveBeenCalledWith('demo', ['mcp__demo__one', 'mcp__demo__two']))
-  })
-
-  it('deletes a file-scope definition only after the acknowledgement, then clears its policy row', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot([view({ scope: 'profile' })]))
-    ;(api.removeServer as ReturnType<typeof vi.fn>).mockResolvedValue(snapshot([]))
-    renderPanel()
-    await waitFor(() => expect(screen.getByText('remove')).toBeTruthy())
-    fireEvent.click(screen.getByText('remove'))
-    // The dialog is the gate: nothing is deleted until it is confirmed.
-    expect(screen.getByRole('dialog', { name: 'removeTitle' })).toBeTruthy()
-    expect(api.removeServer).not.toHaveBeenCalled()
-    expect((screen.getByText('confirm') as HTMLButtonElement).closest('button')?.disabled).toBe(true)
-
-    fireEvent.click(screen.getByLabelText('removeAcknowledge'))
-    fireEvent.click(screen.getByText('confirm'))
-    await waitFor(() => expect(api.removeServer).toHaveBeenCalled())
-    await waitFor(() => expect(entry.setDisabledTools).toHaveBeenCalledWith('demo', undefined))
-  })
-
-  it('leaves the definition alone when the confirmation is cancelled', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot([view({ scope: 'profile' })]))
-    renderPanel()
-    await waitFor(() => expect(screen.getByText('remove')).toBeTruthy())
-    fireEvent.click(screen.getByText('remove'))
-    fireEvent.click(screen.getByText('cancel'))
-    expect(screen.queryByRole('dialog')).toBeNull()
-    expect(api.removeServer).not.toHaveBeenCalled()
-  })
-})
-
-describe('McpSection multi-scope surfaces', () => {
-  it('badges the winning scope, marks shadowed definitions, and offers a migration', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue({
-      ...snapshot([view({ scope: 'entry', shadowed: ['user'] })]),
-      sources: [
-        { scope: 'profile', path: '/home/profiles/web/mcp.json', writable: true, compat: false, exists: true, serverCount: 0 },
-        { scope: 'entry', path: 'cordis.patch.yml · web-mcp-manager', writable: true, compat: false, exists: true, serverCount: 1 },
-      ],
-    })
-    const { container } = renderPanel()
-    await waitFor(() => expect(screen.getByText('edit')).toBeTruthy())
-    expect(container.querySelector('[data-mcp-scope="entry"]')).not.toBeNull()
-    expect(container.querySelector('[data-mcp-shadowed="user"]')).not.toBeNull()
-    // The source rows carry path, state, and per-entry problems.
-    expect(container.querySelector('[data-mcp-source="profile"]')).not.toBeNull()
-    expect(screen.getByText('/home/profiles/web/mcp.json')).toBeTruthy()
-    fireEvent.click(screen.getByText('migrate'))
-    await waitFor(() => expect(api.upsertServer).toHaveBeenCalled())
-    const request = (api.upsertServer as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]
-    expect(request.scope).toBe('profile')
-  })
-
-  it('roots the project scope at the selected workspace and sends it with every request', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue({
-      ...snapshot([]),
-      workspaces: [{ id: 'w1', path: '/repo/one', title: 'one' }],
-    })
-    const { container } = renderPanel()
-    await waitFor(() => expect(container.querySelector('[data-mcp-project]')).not.toBeNull())
-    fireEvent.change(container.querySelector('[data-mcp-project]') as HTMLSelectElement, { target: { value: '/repo/one' } })
-    await waitFor(() => {
-      const calls = (api.snapshot as ReturnType<typeof vi.fn>).mock.calls
-      expect(calls.some(call => (call[0] as { projectPath?: string }).projectPath === '/repo/one')).toBe(true)
-    })
-    // A new server defaults to the project scope once a workspace is selected.
-    fireEvent.click(screen.getByText('add'))
-    await waitFor(() => expect(container.querySelector('[data-mcp-scope-select]')).not.toBeNull())
-    // A new server defaults to the project scope once a workspace is selected,
-    // and the segmented control shows every scope at once — the point of a
-    // multi-scope store — with the selected one marked.
-    expect(container.querySelector('[data-mcp-scope-select]')?.getAttribute('data-mcp-scope-select')).toBe('project')
-    expect(screen.getByRole('tab', { name: 'scopeProject' }).getAttribute('aria-selected')).toBe('true')
-    for (const scope of ['project', 'profile', 'user', 'entry']) {
-      expect(screen.getByRole('tab', { name: `scope${scope[0]?.toUpperCase()}${scope.slice(1)}` })).toBeTruthy()
-    }
-  })
-
-  it('locks a scope the current deployment cannot take the write for', async () => {
-    api = makeApi()
-    api.snapshot.mockResolvedValue(snapshot([]))
-    // No entry form means no entry-scope write, so the segment says so instead
-    // of offering a save the Host would refuse.
-    const { container } = renderPanel({ available: false, writable: false })
-    await waitFor(() => expect(screen.getByText('add')).toBeTruthy())
-    fireEvent.click(screen.getByText('add'))
-    await waitFor(() => expect(container.querySelector('[data-mcp-scope-select]')).not.toBeNull())
-    expect((screen.getByRole('tab', { name: 'scopeEntry' }) as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByRole('tab', { name: 'scopeProfile' }) as HTMLButtonElement).disabled).toBe(false)
-  })
-
-  it('keeps a templated secret row read-only instead of rewriting it', async () => {
-    api = makeApi()
-    const server = view({
-      env: { TOKEN: { set: true, sensitive: false } },
-      templates: { env: ['TOKEN'], headers: [] },
-    })
-    api.snapshot.mockResolvedValue(snapshot([server]))
-    const { container } = renderPanel()
-    await waitFor(() => expect(screen.getByText('edit')).toBeTruthy())
-    fireEvent.click(screen.getByText('edit'))
-    await waitFor(() => expect(container.querySelector('form')).not.toBeNull())
-    expect(container.querySelector('[data-mcp-template="TOKEN"]')).not.toBeNull()
-    fireEvent.click(screen.getByText('save'))
-    await waitFor(() => expect(api.upsertServer).toHaveBeenCalled())
-    const request = (api.upsertServer as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { server: { env: Record<string, unknown> } }
-    // No clear, no value: the template in the file stays untouched.
-    expect(request.server.env.TOKEN).toBeUndefined()
+  it('disables one tool through the own form', async () => {
+    const client = api(async () => snapshot({
+      servers: [fileServer()],
+      tools: [{ name: 'mcp__demo__read', serverId: 'demo', description: 'read', parameters: {}, enabled: true }],
+    }))
+    const forms = makeForms()
+    await renderReady(client, forms)
+    fireEvent.click(screen.getByText(/card\.tools/u))
+    fireEvent.click(screen.getByLabelText('tool.disable'))
+    await waitFor(() => expect(forms.own.setDisabledTools).toHaveBeenCalledWith('demo', ['mcp__demo__read']))
   })
 })

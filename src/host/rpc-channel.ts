@@ -60,7 +60,7 @@ export function registerManagerRpcRoute(
 ): () => Promise<void> {
   const disposers = MCP_MANAGER_ENDPOINTS.map(endpoint => ctx.effect(
     () => ctx.connection.fetch.register(managerRoute(endpoint, dispatch)),
-    `web-mcp-manager: ${mcpManagerRoutePath(endpoint)} route`,
+    `dsh-mcp-manager: ${mcpManagerRoutePath(endpoint)} route`,
   ))
   // The official disposer mirrors the old route teardown: async, and safe to
   // call once after the plugin fiber is already unloading.

@@ -1,36 +1,40 @@
 /**
- * The panel's view of the Host, held in the official client store.
+ * The panel's data layer, held in the official client store.
  *
- * `@deepseek-ai/dsh-client-store` is the snapshot store the Web shell seeds for
- * every plugin, so the page keeps its data where the rest of the product keeps
- * its own: one reference-stable snapshot, one subscription, and a single write
- * face. The component therefore reads with `useSyncExternalStore` and never
- * owns the request bookkeeping.
+ * Three sources feed one reference-stable snapshot:
  *
- * What the store buys beyond tidiness is testability. The panel's load rule —
- * a monotonic sequence, where only the newest request may publish and a failed
- * poll never discards a standing snapshot — used to live inside the component's
- * effects, where the only way to observe it was a jsdom test that waited out a
- * real poll interval. It is now plain code over a fake transport.
+ * 1. the Host's `snapshot` RPC (file scopes, registration outcomes, tools);
+ * 2. the official `mcpManager.watch` stream (live status and OAuth attempts);
+ * 3. the two official shared forms (`mcp-manager` entries and this plugin's
+ *    own `disabledTools`), which the Host writes through the settings service.
  *
- * `mcp.json` reads, `mcp.json` writes, and runtime status all come from the
- * manager's own RPC; the legacy entry scope is not here, because the browser
- * edits it through the official shared settings form (`./entry-form.ts`).
+ * Live status is push-based, so the file snapshot can poll at a calm interval
+ * without making the page feel stale. Every operation publishes through this
+ * store, and a monotonic sequence keeps a slow read from overwriting a newer
+ * one.
  */
+import type { Context } from '@deepseek-ai/cordis';
+import type { McpManagedServerView } from '@deepseek-ai/dsh-mcp-manager';
+import type { McpProbeResult } from '@deepseek-ai/dsh-mcp-client/types';
 import { type SnapshotStore } from '@deepseek-ai/dsh-client-store';
-import type { Snapshot } from '../types.ts';
+import type { AuthorizationResult, McpScope, ServerPatch, Snapshot } from '../types.ts';
 import type { ManagerClientApi } from './api.ts';
+import type { FormState, OwnFormFace, UpstreamFormFace } from './entry-form.ts';
+import type { EntryServer, ServerSummary, UpstreamConfig } from './summary.ts';
+import type { McpLocaleKey } from './locales.ts';
+export interface ManagerNotice {
+    readonly tone: 'success' | 'error';
+    readonly text: string;
+}
 /**
  * Everything the page renders, plus the state its operations own.
  *
  * The fields are mutable because `SnapshotStore.update` hands the mutator this
  * exact type; the store freezes every published snapshot, so nothing outside a
- * mutator can actually write one.
+ * mutator can write one.
  */
 export interface ManagerView {
-    /** `loading` until the first answer, `error` when none ever arrived. */
     status: 'loading' | 'ready' | 'error';
-    /** The last accepted snapshot; undefined until the first one. */
     snapshot: Snapshot | undefined;
     /** The first read's failure, while no snapshot stands. */
     error: string | undefined;
@@ -38,42 +42,59 @@ export interface ManagerView {
     pollFailed: boolean;
     /** A user operation is crossing the wire. */
     busy: boolean;
-    /** The last operation's refusal or failure, until the next operation. */
-    message: string | undefined;
-    /** Registered workspace root the project scope is read and written against. */
+    /** The last operation's refusal, or a success confirmation (already translated by the caller). */
+    notice: ManagerNotice | undefined;
+    /** The official manager's live list, or the last list received. */
+    managed: readonly McpManagedServerView[];
+    /** The status stream's carrier failed; the page keeps the last list. */
+    streamFailed: boolean;
+    /** The official `mcp-manager` entry form. */
+    upstream: FormState<UpstreamConfig>;
+    /** This plugin's own entry form (`disabledTools`). */
+    own: FormState<{
+        disabledTools?: Record<string, string[]>;
+    }>;
+    /** Registered workspace root the project scope reads and writes. */
     projectPath: string | undefined;
+    /** Last successful read, epoch milliseconds. */
+    updatedAt: number | undefined;
 }
 export interface ManagerStore {
-    /** The official snapshot store the component subscribes to. */
     readonly state: SnapshotStore<ManagerView>;
-    /** Root the project scope at another workspace and re-read. */
-    selectProject: (projectPath: string | undefined) => void;
-    /** Show one message the store did not derive from a request. */
-    notify: (message: string) => void;
-    /** Dismiss the current action message. */
-    clearMessage: () => void;
-    /** Run one RPC operation whose answer IS the next snapshot. */
-    run: (operation: () => Promise<Snapshot>) => Promise<Snapshot | undefined>;
-    /** Re-read the Host as a user action (the refresh control). */
-    refresh: () => Promise<void>;
-    /**
-     * Run one official-form write.
-     *
-     * The form answers with acceptance rather than a snapshot — it owns revision
-     * fencing and has already reloaded its own state on a refusal — so the page
-     * reports a refusal and re-reads through its own RPC, which stays the single
-     * place the merged `project → profile → user → entry` view is computed.
-     * @param operation - the write, answering whether the Host accepted it.
-     * @param refusedMessage - the copy to show when it did not.
-     * @returns whether the write was accepted.
-     */
-    runForm: (operation: () => Promise<boolean>, refusedMessage: string) => Promise<boolean>;
-    /**
-     * Read once and keep reading while the document is visible.
-     * @param intervalMs - poll period; the default is production's.
-     * @returns the stopper.
-     */
-    startPolling: (intervalMs?: number) => () => void;
+    selectProject(projectPath: string | undefined): void;
+    refresh(): void;
+    notify(text: string, tone?: ManagerNotice['tone']): void;
+    clearNotice(): void;
+    upsertServer(request: {
+        readonly scope: McpScope;
+        readonly server: ServerPatch;
+    }): Promise<boolean>;
+    removeServer(row: ServerSummary): Promise<boolean>;
+    setEnabled(row: ServerSummary, enabled: boolean): Promise<boolean>;
+    restart(name: string): Promise<boolean>;
+    probe(name: string): Promise<{
+        readonly ok: true;
+        readonly result: McpProbeResult;
+    } | {
+        readonly ok: false;
+        readonly message: string;
+    }>;
+    authorize(name: string): Promise<AuthorizationResult | undefined>;
+    cancelAuthorization(name: string, id: string): Promise<boolean>;
+    signOut(name: string): Promise<boolean>;
+    saveEntry(name: string, entry: EntryServer): Promise<boolean>;
+    removeEntry(name: string): Promise<boolean>;
+    setEntryEnabled(name: string, enabled: boolean): Promise<boolean>;
+    setToolEnabled(server: string, tool: string, enabled: boolean): Promise<boolean>;
+    dispose(): void;
 }
-export declare function createManagerStore(api: ManagerClientApi): ManagerStore;
+/**
+ * Create the store and start its read loop.
+ * @param ctx - the browser plugin context (connection, remote, forms).
+ * @param api - the Host RPC face.
+ * @param upstream - the official entry form face.
+ * @param own - this plugin's entry form face.
+ * @param translate - the page translator, used for notices.
+ */
+export declare function createManagerStore(ctx: Context, api: ManagerClientApi, upstream: UpstreamFormFace, own: OwnFormFace, translate: (key: McpLocaleKey, params?: Record<string, unknown>) => string): ManagerStore;
 //# sourceMappingURL=manager-store.d.ts.map

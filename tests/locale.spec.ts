@@ -6,7 +6,7 @@
  * every other `*.json` beside it, each resolved through the package specifier
  * before it is read. When that anchor is absent — or present but not exported —
  * the page falls back to the untranslated `package.json` name, which is the raw
- * `@junjiangao/dsh-web-mcp-manager` this plugin used to show.
+ * `@junjiangao/dsh-mcp-manager` this plugin used to show.
  *
  * These tests mirror the Host rules the way `@junjiangao/dsh-web-search-tavily`
  * does, so a locale file the Host would reject fails here instead: a filename

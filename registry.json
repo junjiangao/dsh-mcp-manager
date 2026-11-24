@@ -1,8 +1,8 @@
 {
-  "id": "junjiangao/dsh-web-mcp-manager",
-  "name": "@junjiangao/dsh-web-mcp-manager",
-  "description": "Web settings panel and Host lifecycle manager for user-owned MCP servers in DeepSeek Harness dsh 0.2.x",
+  "id": "junjiangao/dsh-mcp-manager",
+  "name": "@junjiangao/dsh-mcp-manager",
+  "description": "MCP server manager for DeepSeek Harness: one panel over the official mcp-manager entries and multi-scope mcp.json files, with live status, restart, probe, tools and OAuth.",
   "install": {
-    "spec": "github:junjiangao/dsh-web-mcp-manager"
+    "spec": "github:junjiangao/dsh-mcp-manager"
   }
 }

@@ -27,7 +27,7 @@ import { apply as connectionApply, inject as connectionInject, type HostConnecti
 import type { WebRoute, WebServer, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { describe, expect, it } from 'vitest'
 import { apply as hostApply, inject as hostInject, name as hostName } from '../src/host/index.ts'
-import { Config, MANAGER_NAMESPACE, defaultDocument } from '../src/settings.ts'
+import { Config } from '../src/settings.ts'
 import { MCP_MANAGER_ENDPOINTS, mcpManagerRoutePath } from '../src/types.ts'
 
 /** Mutable credential-record double: BrowserAuth.create() only needs these three. */
@@ -75,17 +75,27 @@ function fakeWebServer(routes: WebRoute[], upgrades: WebUpgradeRoute[]): WebServ
   } as unknown as WebServer
 }
 
-/** Minimal settings double holding the manager document in memory. */
+/** Minimal settings double: the controller reads the profile path and disables auto forms. */
 function fakeSettings(): unknown {
-  let document = defaultDocument()
-  let revision = 0
   return {
-    describe: () => [{ ns: MANAGER_NAMESPACE, revision }],
-    replace: async (_ns: string, next: typeof document) => {
-      document = next
-      revision += 1
-    },
+    documentPath: '/home/test/.dsh/profiles/desktop/cordis.patch.yml',
     writable: true,
+    configure: () => () => {},
+  }
+}
+
+/** Minimal official manager double: registrations are accepted and forgotten. */
+function fakeMcpManager(): unknown {
+  const registered = new Map<string, () => void>()
+  return {
+    list: () => [...registered.keys()].map(name => ({ name, status: { state: 'connected', connectedAt: Date.now(), toolCount: 0 } })),
+    register: (name: string) => {
+      registered.set(name, () => { registered.delete(name) })
+      return () => { registered.delete(name) }
+    },
+    startAuthorization: async () => ({ id: 'attempt-1', phase: 'starting' }),
+    cancelAuthorization: async () => {},
+    signOut: async () => {},
   }
 }
 
@@ -119,6 +129,7 @@ async function fixture(): Promise<Fixture> {
   ctx.provide('credentials', new RecordCredentials() as never)
   ctx.provide('settings', fakeSettings() as never)
   ctx.provide('tools', fakeTools() as never)
+  ctx.provide('mcpManager', fakeMcpManager() as never)
   const webserver = ctx.plugin({
     name: 'fake-webserver-entry',
     apply: (webCtx: Context) => {
@@ -133,9 +144,10 @@ async function fixture(): Promise<Fixture> {
 
 describe('Host entry load path', () => {
   it('keeps the namespace shape and no longer requires webServer', () => {
-    expect(hostName).toBe('@junjiangao/dsh-web-mcp-manager')
+    expect(hostName).toBe('@junjiangao/dsh-mcp-manager')
     expect(typeof hostApply).toBe('function')
     expect(hostInject).toContain('connection')
+    expect(hostInject).toContain('mcpManager')
     expect(hostInject).not.toContain('webServer')
   })
 
@@ -154,7 +166,7 @@ describe('Host entry load path', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ type: 'client-request', rpcId: 'rpc-1', method: endpoint, payload: {} }),
-      }))
+      }), { principal: { kind: 'owner' } } as never)
       expect(response.status, `${endpoint} should answer through the shared channel`).toBe(200)
       const body = await response.json() as { type: string; rpcId: string }
       expect(body.type).toBe('server-response')

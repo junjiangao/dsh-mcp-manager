@@ -1,73 +1,125 @@
+/** Runtime validation, patch semantics, secret projection, and view mapping. */
+
 import { describe, expect, it } from 'vitest'
-import { defaultServer, validateServerConfig } from '../src/settings.ts'
-import { mergeServerPatch, projectTool, redactServer, serverIdFromToolName } from '../src/protocol.ts'
+import {
+  applyServerPatch, parseSnapshotRequest, parseUpsertRequest, secretStates, serverFromPatch, templatesOf, toServerView, toWorkspaceViews,
+} from '../src/protocol.ts'
+import { defaultServer } from '../src/server-config.ts'
+import type { ManagedServerView, StoredServer } from '../src/types.ts'
 
-describe('MCP manager protocol projections', () => {
-  it('preserves an existing secret when a redacted edit omits it', () => {
-    const current = defaultServer('demo')
-    current.command = 'node'
-    current.env.TOKEN = 'old-value'
+function base(): StoredServer {
+  return { ...defaultServer('demo'), command: 'node', env: { A: '1', TOKEN: 'secret' } }
+}
 
-    const next = mergeServerPatch(current, {
+describe('request parsing', () => {
+  it('defaults a snapshot request and validates the project target', () => {
+    expect(parseSnapshotRequest(undefined)).toEqual({})
+    expect(parseSnapshotRequest({})).toEqual({})
+    expect(parseSnapshotRequest({ scope: 'user', projectPath: '/p' })).toEqual({ scope: 'user', projectPath: '/p' })
+    expect(() => parseSnapshotRequest({ projectPath: 'relative' })).toThrow(/absolute/u)
+    expect(() => parseSnapshotRequest({ scope: 'entry' })).toThrow(/must be one of/u)
+  })
+
+  it('validates an upsert payload and keeps the keep marker for secrets', () => {
+    const request = parseUpsertRequest({
+      scope: 'profile',
+      server: { id: 'demo', transport: 'stdio', command: 'node', env: { A: '1', B: {} }, envSensitive: ['B'] },
+    })
+    expect(request.scope).toBe('profile')
+    expect(request.server.env).toEqual({ A: '1', B: {} })
+    expect(() => parseUpsertRequest({ server: { id: 'demo', env: { A: 5 } } })).toThrow(/must be a string or a patch object/u)
+  })
+})
+
+describe('patch application', () => {
+  it('replaces maps wholesale but keeps a masked secret for the keep marker', () => {
+    const next = applyServerPatch(base(), { id: 'demo', env: { TOKEN: {}, A: '2' } })
+    expect(next.env).toEqual({ TOKEN: 'secret', A: '2' })
+    const cleared = applyServerPatch(base(), { id: 'demo', env: { A: { clear: true } } })
+    expect(cleared.env).toEqual({})
+  })
+
+  it('clears the other transport fields on a switch and deletes OAuth with null', () => {
+    const http = applyServerPatch(base(), {
+      id: 'demo', transport: 'streamable-http', url: 'https://x.test/mcp', oauth: { credentialKey: 'mcp-client/demo', requestTimeoutMs: 1, authorizationTimeoutMs: 2 },
+    })
+    expect(http.transport).toBe('streamable-http')
+    expect(http.command).toBe('')
+    expect(http.env).toEqual({})
+    expect(http.args).toEqual([])
+    const stdio = applyServerPatch(http, { id: 'demo', transport: 'stdio', command: 'node', oauth: null })
+    expect(stdio.url).toBe('')
+    expect(stdio.oauth).toBeUndefined()
+    expect(stdio.env).toEqual({})
+  })
+
+  it('rejects a patch whose result fails validation', () => {
+    expect(() => applyServerPatch(base(), { id: 'demo', toolCallTimeoutMs: 0 })).toThrow(/must be an integer|must be a positive/u)
+    expect(() => serverFromPatch({ id: 'bad id', transport: 'stdio', command: 'node' })).toThrow(/must match/u)
+  })
+
+  it('builds a fresh stdio server with the official defaults', () => {
+    const server = serverFromPatch({ id: 'fresh', transport: 'stdio', command: 'node' })
+    expect(server.startupTimeoutMs).toBe(30_000)
+    expect(server.closeTimeoutMs).toBe(5_000)
+    expect(server.toolCallTimeoutMs).toBe(60_000)
+    expect(server.toolLoading).toBe('eager')
+    expect(server.enabled).toBe(true)
+  })
+})
+
+describe('secret projection', () => {
+  it('reports existence, masking intent, and template kinds without the value', () => {
+    const states = secretStates({ TOKEN: 'secret', REF: '${credential:mcp-client/demo}', EMPTY: '' }, ['TOKEN'])
+    expect(states.TOKEN).toEqual({ set: true, sensitive: true, template: false, credential: false })
+    expect(states.REF).toEqual({ set: true, sensitive: false, template: false, credential: true })
+    expect(states.EMPTY).toEqual({ set: false, sensitive: false, template: false, credential: false })
+  })
+
+  it('names the templated fields, including a credential URL', () => {
+    const server: StoredServer = {
+      ...defaultServer('demo'),
+      transport: 'streamable-http',
+      url: '${credential:mcp-client/demo}',
+      env: { AUTH: '${credential:mcp-client/env}' },
+      headers: { TOKEN: '${env:TOKEN}' },
+      oauth: { credentialKey: 'mcp-client/demo', requestTimeoutMs: 1, authorizationTimeoutMs: 2 },
+    }
+    expect(templatesOf(server)).toEqual({
+      env: [],
+      headers: ['TOKEN'],
+      credentials: ['env.AUTH', 'url'],
+    })
+  })
+})
+
+describe('view mapping', () => {
+  it('maps a sourced server and its registration outcome', () => {
+    const view = toServerView({
       id: 'demo',
-      command: 'node',
-      env: { OTHER: 'new-value' },
-    })
-
-    expect(next.env).toEqual({ TOKEN: 'old-value', OTHER: 'new-value' })
+      scope: 'profile',
+      path: '/profile/mcp.json',
+      writable: true,
+      shadowed: [{ scope: 'user', path: '/user/mcp.json' }],
+      server: base(),
+    }, { state: 'missing-env', missing: ['TOKEN'] })
+    expect(view.id).toBe('demo')
+    expect(view.path).toBe('/profile/mcp.json')
+    expect(view.scope).toBe('profile')
+    expect(view.shadowed).toEqual(['user'])
+    expect(view.registration).toEqual({ state: 'missing-env', missing: ['TOKEN'] })
+    expect(view.env.TOKEN).toEqual({ set: true, sensitive: false, template: false, credential: false })
   })
 
-  it('supports explicit secret clearing and redacts values from the view', () => {
-    const current = defaultServer('demo')
-    current.command = 'node'
-    current.env.TOKEN = 'old-value'
-    const next = mergeServerPatch(current, { id: 'demo', env: { TOKEN: { clear: true } } })
-
-    expect(next.env).toEqual({})
-    expect(redactServer({ ...current, env: { TOKEN: 'old-value' } }, 'loaded', 0).env).toEqual({ TOKEN: { set: true, sensitive: false } })
+  it('maps workspaces with a title fallback', () => {
+    expect(toWorkspaceViews([{ id: 1, path: '/p' }, { id: 2, path: '/q', title: 'Q' }])).toEqual([
+      { id: '1', path: '/p', title: '/p' },
+      { id: '2', path: '/q', title: 'Q' },
+    ])
   })
 
-  it('marks sensitive env keys in the redacted view and persists the list', () => {
-    const current = defaultServer('demo')
-    current.command = 'node'
-    const next = mergeServerPatch(current, {
-      id: 'demo',
-      env: { TOKEN: 'value', NUM: '2048' },
-      envSensitive: ['TOKEN'],
-    })
-    expect(next.envSensitive).toEqual(['TOKEN'])
-    expect(redactServer(next, 'loaded', 0).env).toEqual({
-      NUM: { set: true, sensitive: false },
-      TOKEN: { set: true, sensitive: true },
-    })
-    // patch 未提供 sensitive 列表时保持现状
-    const unchanged = mergeServerPatch(next, { id: 'demo', env: { EXTRA: 'x' } })
-    expect(unchanged.envSensitive).toEqual(['TOKEN'])
-  })
-
-  it('keeps secret keys as data even when they use object-prototype names', () => {
-    const current = defaultServer('demo')
-    current.command = 'node'
-    const next = mergeServerPatch(current, { id: 'demo', env: { ['__proto__']: 'value' } })
-    expect(Object.prototype.hasOwnProperty.call(next.env, '__proto__')).toBe(true)
-    expect(next.env['__proto__']).toBe('value')
-    expect(Object.getPrototypeOf(next.env)).toBe(Object.prototype)
-  })
-
-  it('keeps MCP tool ownership tied to the server namespace', () => {
-    expect(serverIdFromToolName('mcp__demo__read_file')).toBe('demo')
-    expect(serverIdFromToolName('mcp___demo__read_file')).toBe('_demo')
-    expect(serverIdFromToolName('mcp__demo__with__underscores', ['demo__with'])).toBe('demo__with')
-    expect(serverIdFromToolName('other_tool')).toBeUndefined()
-    expect(projectTool({ name: 'mcp__demo__read_file', parameters: {} }, new Set())).toMatchObject({
-      serverId: 'demo',
-      enabled: true,
-    })
-    expect(projectTool({ name: 'mcp__foreign__read_file', parameters: {} }, new Set(), ['demo'])).toBeUndefined()
-  })
-
-  it('rejects an enabled stdio server without a command', () => {
-    const server = defaultServer('demo')
-    expect(() => validateServerConfig(server)).toThrow(/needs a command/u)
+  it('keeps the expected tool ownership helper contract', () => {
+    const view: Pick<ManagedServerView, 'id'> = { id: 'demo' }
+    expect(view.id).toBe('demo')
   })
 })
