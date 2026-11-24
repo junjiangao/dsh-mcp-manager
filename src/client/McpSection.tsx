@@ -174,9 +174,9 @@ export function McpSection(props: McpSectionProps) {
       </div>
 
       <div className={cx('dsh-mcp-summary')}>
-        <span className={cx('dsh-mcp-summary-chip')}><StateDot state="done" size={8} />{t('summary.connected', { count: counts.connected })}</span>
-        <span className={cx('dsh-mcp-summary-chip')}><StateDot state="ongoing" size={8} />{t('summary.busy', { count: counts.busy })}</span>
-        <span className={cx('dsh-mcp-summary-chip')}><StateDot state="warning" size={8} />{t('summary.attention', { count: counts.attention })}</span>
+        <span className={cx('dsh-mcp-summary-chip')}><StateDot state={counts.connected > 0 ? 'done' : 'idle'} size={8} />{t('summary.connected', { count: counts.connected })}</span>
+        <span className={cx('dsh-mcp-summary-chip')}><StateDot state={counts.busy > 0 ? 'ongoing' : 'idle'} size={8} />{t('summary.busy', { count: counts.busy })}</span>
+        <span className={cx('dsh-mcp-summary-chip')}><StateDot state={counts.attention > 0 ? 'warning' : 'idle'} size={8} />{t('summary.attention', { count: counts.attention })}</span>
         <span className={cx('dsh-mcp-summary-chip')}><StateDot state="idle" size={8} />{t('summary.disabled', { count: counts.disabled })}</span>
         <span className={cx('dsh-mcp-summary-total')}>{t('count', { count: counts.total })}</span>
       </div>

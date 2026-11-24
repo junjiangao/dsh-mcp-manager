@@ -147,6 +147,7 @@ export declare const zh: {
     readonly 'editor.valuePlaceholder': "值或 ${env:NAME}";
     readonly 'editor.secret': "敏感值";
     readonly 'editor.secretKept': "已保存，留空表示不修改";
+    readonly 'editor.secretHint': "已保存的敏感值不会回显；留空保存时保持原值。";
     readonly 'editor.templated': "环境模板";
     readonly 'editor.credentialTemplate': "凭据模板，由 dsh 解析";
     readonly 'editor.advanced': "高级选项";
@@ -181,6 +182,7 @@ export declare const zh: {
     readonly 'editor.conflict': "保存被拒绝：配置已在别处修改";
     readonly 'editor.conflictHint': "面板已重新读取最新配置，请核对后再次保存。";
     readonly 'editor.noWorkspace': "还没有可用的项目工作区";
+    readonly 'editor.noProject': "先选择项目，才能写入项目级 mcp.json。";
     readonly 'editor.noEntryWrite': "官方 mcp-manager 不可用：无法写入配置条目，请改用 mcp.json。";
     readonly 'probe.title': "探测 {name}";
     readonly 'probe.running': "正在连接并读取工具目录…";

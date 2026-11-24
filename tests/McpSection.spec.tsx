@@ -147,6 +147,12 @@ describe('MCP panel', () => {
     expect(screen.getByText(/read a file/u)).toBeTruthy()
   })
 
+  it('keeps empty status buckets static', async () => {
+    const client = api(async () => snapshot({ servers: [fileServer()] }))
+    const view = await renderReady(client)
+    expect(view.container.querySelector('[data-state="ongoing"]')).toBeNull()
+  })
+
   it('filters by search text and by source', async () => {
     const client = api(async () => snapshot({ servers: [fileServer(), fileServer({ id: 'other', label: 'other' })] }))
     await renderReady(client, makeForms({ 'entry-one': { command: 'node' } }))

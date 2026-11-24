@@ -124,7 +124,7 @@ export const PANEL_CSS = `
 .dsh-mcp-source-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .dsh-mcp-source-row code { font-family: ${MONO}; font-size: 11px; overflow-wrap: anywhere; }
 .dsh-mcp-note { color: ${COLORS.tertiary}; font-size: 12px; margin: 0; }
-.dsh-mcp-editor { display: flex; flex-direction: column; gap: 14px; }
+.dsh-mcp-editor { display: flex; flex-direction: column; gap: 14px; container-type: inline-size; }
 .dsh-mcp-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .dsh-mcp-field > label, .dsh-mcp-field-label { color: ${COLORS.secondary}; font-size: 12px; }
 .dsh-mcp-field input, .dsh-mcp-field select, .dsh-mcp-field textarea {
@@ -139,9 +139,15 @@ export const PANEL_CSS = `
 .dsh-mcp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
 .dsh-mcp-section-title { font-weight: 600; color: ${COLORS.text}; margin: 0; }
 .dsh-mcp-rows { display: flex; flex-direction: column; gap: 6px; }
-.dsh-mcp-row { display: flex; align-items: center; gap: 6px; }
-.dsh-mcp-row input { flex: 1; min-width: 0; }
-.dsh-mcp-row-key { flex: 0 1 34%; }
+.dsh-mcp-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dsh-mcp-row input { width: 100%; min-width: 0; }
+.dsh-mcp-row-key { flex: 0 1 34%; min-width: 0; }
+.dsh-mcp-row-value { flex: 1 1 140px; min-width: 0; }
+.dsh-mcp-target { width: 100%; max-width: 100%; }
+@container (max-width: 560px) {
+  .dsh-mcp-row-key { flex: 1 1 100%; }
+  .dsh-mcp-row-value { flex: 1 1 60%; }
+}
 .dsh-mcp-row-flag { display: inline-flex; align-items: center; gap: 4px; color: ${COLORS.secondary}; font-size: 12px; white-space: nowrap; }
 .dsh-mcp-row-remove { flex: none; }
 .dsh-mcp-tag-note { color: ${COLORS.tertiary}; font-size: 11px; }

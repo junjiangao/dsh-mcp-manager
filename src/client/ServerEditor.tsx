@@ -46,13 +46,20 @@ export function ServerEditor(props: ServerEditorProps) {
   return (
     <div>
       <div className={cx('dsh-mcp-editor')}>
-        <div className={cx('dsh-mcp-field')}>
+        <label className={cx('dsh-mcp-field')}>
           <span className={cx('dsh-mcp-field-label')}>{t('editor.target')}</span>
-          <SegmentedControl id="dsh-mcp-target" label={t('editor.target')} value={draft.target}
-            options={targetOptions} onChange={target => { patch({ target }) }} disabled={props.busy || (editing && draft.target === 'entry' && !props.entryWritable)} />
+          <select className={cx('dsh-mcp-target')} value={draft.target} disabled={props.busy || (editing && draft.target === 'entry' && !props.entryWritable)}
+            onChange={(event) => { patch({ target: event.target.value as DraftTarget }) }}>
+            {targetOptions.map(option => (
+              <option key={option.value} value={option.value} disabled={option.disabled} title={option.title}>{option.label}</option>
+            ))}
+          </select>
           <span className={cx('dsh-mcp-field-hint')}>{draft.target === 'entry' ? t('editor.targetHintEntry') : t('editor.targetHintFile')}</span>
-          {draft.target === 'project' && !props.hasProjectSelection ? <span className={cx('dsh-mcp-field-hint')}>{t('editor.noWorkspace')}</span> : null}
-        </div>
+          {!props.hasWorkspace
+            ? <span className={cx('dsh-mcp-field-hint')}>{t('editor.noWorkspace')}</span>
+            : !props.hasProjectSelection ? <span className={cx('dsh-mcp-field-hint')}>{t('editor.noProject')}</span> : null}
+          {!props.entryWritable ? <span className={cx('dsh-mcp-field-hint')}>{t('editor.noEntryWrite')}</span> : null}
+        </label>
 
         <div className={cx('dsh-mcp-grid')}>
           <label className={cx('dsh-mcp-field')}>
@@ -256,12 +263,13 @@ function MapRows(props: MapRowsProps) {
         {props.rows.map((row, index) => (
           <div key={index} className={cx('dsh-mcp-row')}>
             <Input className={cx('dsh-mcp-row-key')} value={row.key} placeholder={t('editor.keyPlaceholder')} spellCheck={false}
+              title={row.key}
               disabled={props.busy} aria-label={`${props.label} ${t('editor.keyPlaceholder')} ${String(index + 1)}`}
               onChange={(event) => {
                 const rows = props.rows.map((entry, position) => position === index ? { ...entry, key: event.target.value } : entry)
                 props.onChange(rows)
               }} />
-            <Input value={row.value} placeholder={row.configured ? t('editor.secretKept') : t('editor.valuePlaceholder')} spellCheck={false}
+            <Input className={cx('dsh-mcp-row-value')} value={row.value} placeholder={row.configured ? t('editor.secretKept') : t('editor.valuePlaceholder')} spellCheck={false}
               disabled={props.busy} aria-label={`${props.label} ${t('editor.valuePlaceholder')} ${String(index + 1)}`}
               onChange={(event) => {
                 const rows = props.rows.map((entry, position) => position === index ? { ...entry, value: event.target.value } : entry)
@@ -284,6 +292,9 @@ function MapRows(props: MapRowsProps) {
           </div>
         ))}
       </div>
+      {props.fileTarget && props.rows.some(row => row.configured)
+        ? <span className={cx('dsh-mcp-field-hint')}>{t('editor.secretHint')}</span>
+        : null}
       <div>
         <Button variant="outline" size="sm" icon={<IconPlusOutlineRegular size={13} />} disabled={props.busy}
           onClick={() => { props.onChange([...props.rows, { key: '', value: '', secret: false, configured: false }]) }}>
