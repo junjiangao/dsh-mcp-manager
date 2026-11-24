@@ -128,12 +128,11 @@ function authorizationReason(reason: string, t: Translate): string {
   }
 }
 
+/** Local wall-clock time as `HH:MM`; fixed so the line reads the same on every host locale. */
 function clock(epochMs: number): string {
-  try {
-    return new Date(epochMs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  } catch {
-    return String(epochMs)
-  }
+  const date = new Date(epochMs)
+  if (Number.isNaN(date.getTime())) return String(epochMs)
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
 function secondsUntil(epochMs: number, now: number): string {
