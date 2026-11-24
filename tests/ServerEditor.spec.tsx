@@ -78,6 +78,35 @@ describe('server editor', () => {
     expect(onSave.mock.calls[0]?.[0]).toMatchObject({ target: 'profile', name: 'demo', command: 'node' })
   })
 
+  it('renders its own dialog shell and keeps the actions outside the scrolling body', () => {
+    const target = row()
+    const { container } = render(
+      <ServerEditor row={target} draft={createDraft(target)} busy={false} entryWritable hasWorkspace hasProjectSelection={false}
+        t={t} onClose={noop} onSave={noop} />,
+    )
+    const dialog = container.querySelector('[role="dialog"]')
+    expect(dialog?.className).toContain('dsh-mcp-dialog')
+    expect(screen.getByText('editor.edit:demo')).toBeTruthy()
+    const body = container.querySelector('[data-modal-content]')
+    expect(body?.className).toContain('dsh-mcp-dialog-body')
+    expect(body?.querySelectorAll('.dsh-mcp-map-row')).toHaveLength(1)
+    expect(screen.getByText('save').closest('[data-modal-footer]')).not.toBeNull()
+    expect(screen.getByText('cancel').closest('[data-modal-footer]')).not.toBeNull()
+  })
+
+  it('keeps the dialog open and explains a rejected save', () => {
+    const target = row({ name: '' })
+    const onSave = vi.fn()
+    const { container } = render(
+      <ServerEditor row={target} draft={createDraft(target)} busy={false} entryWritable hasWorkspace hasProjectSelection={false}
+        t={t} onClose={noop} onSave={onSave} />,
+    )
+    fireEvent.click(screen.getByText('save'))
+    expect(onSave).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toBeTruthy()
+    expect(container.querySelector('.dsh-mcp-input-invalid')).not.toBeNull()
+  })
+
   it('starts a new server on the official entry', () => {
     const { container } = render(
       <ServerEditor row={undefined} draft={createDraft(undefined, 'entry')} busy={false} entryWritable hasWorkspace hasProjectSelection={false}

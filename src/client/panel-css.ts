@@ -13,6 +13,7 @@ const COLORS = {
   tertiary: 'var(--dsw-alias-label-tertiary, #8a919c)',
   border: 'var(--dsw-alias-border-l2, #e1e4ea)',
   borderSubtle: 'var(--dsw-alias-border-l1, #eceef2)',
+  borderControl: 'var(--dsw-alias-border-l4, #dcdfe5)',
   surface: 'var(--dsw-alias-bg-layer-2, #ffffff)',
   surfaceSubtle: 'var(--dsw-alias-bg-layer-1, #fafbfc)',
   surfaceRaised: 'var(--dsw-alias-bg-layer-3, #f4f5f7)',
@@ -42,6 +43,17 @@ export const PANEL_CSS = `
   line-height: 1.55;
 }
 .dsh-mcp * { box-sizing: border-box; }
+/* The dialog portals to document.body, so the panel scope above never reaches it: restore the same
+   base type scale and box model on the dialog root, and cap its height the way the host contracts ask. */
+.dsh-mcp-dialog {
+  width: min(560px, 100%);
+  max-height: 100%;
+  color: ${COLORS.text};
+  font-size: 13px;
+  line-height: 1.55;
+}
+.dsh-mcp-dialog * { box-sizing: border-box; }
+.dsh-mcp-dialog-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .dsh-mcp-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .dsh-mcp-hero h2 { margin: 0 0 4px; font-size: 18px; font-weight: 600; line-height: 1.3; }
 .dsh-mcp-hero p { margin: 0; color: ${COLORS.secondary}; max-width: 62ch; }
@@ -124,34 +136,37 @@ export const PANEL_CSS = `
 .dsh-mcp-source-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .dsh-mcp-source-row code { font-family: ${MONO}; font-size: 11px; overflow-wrap: anywhere; }
 .dsh-mcp-note { color: ${COLORS.tertiary}; font-size: 12px; margin: 0; }
-.dsh-mcp-editor { display: flex; flex-direction: column; gap: 14px; container-type: inline-size; }
+.dsh-mcp-editor { display: flex; flex-direction: column; gap: 14px; }
 .dsh-mcp-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .dsh-mcp-field > label, .dsh-mcp-field-label { color: ${COLORS.secondary}; font-size: 12px; }
-.dsh-mcp-field input, .dsh-mcp-field select, .dsh-mcp-field textarea {
-  width: 100%; padding: 6px 9px; border-radius: ${RADIUS_SM}; border: 1px solid ${COLORS.border};
-  background: ${COLORS.surface}; color: ${COLORS.text}; font: inherit;
+/* Input primitives draw their own frame on the wrapper: never restyle the inner <input>. */
+.dsh-mcp-input-invalid { border-color: ${COLORS.danger}; }
+.dsh-mcp-target {
+  width: 100%; height: 32px; padding: 0 12px; border-radius: ${RADIUS};
+  border: 0.5px solid ${COLORS.borderControl}; background: ${COLORS.surfaceSubtle}; color: ${COLORS.text};
+  font: inherit; font-size: 14px;
 }
-.dsh-mcp-field input[aria-invalid="true"] { border-color: ${COLORS.danger}; }
-.dsh-mcp-field input:focus-visible, .dsh-mcp-field select:focus-visible {
-  outline: none; border-color: ${COLORS.business}; box-shadow: ${FOCUS};
-}
+.dsh-mcp-target:focus-visible { outline: none; border-color: ${COLORS.business}; }
 .dsh-mcp-field-hint { color: ${COLORS.tertiary}; font-size: 11px; overflow-wrap: anywhere; }
 .dsh-mcp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
 .dsh-mcp-section-title { font-weight: 600; color: ${COLORS.text}; margin: 0; }
-.dsh-mcp-rows { display: flex; flex-direction: column; gap: 6px; }
-.dsh-mcp-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.dsh-mcp-row input { width: 100%; min-width: 0; }
-.dsh-mcp-row-key { flex: 0 1 34%; min-width: 0; }
-.dsh-mcp-row-value { flex: 1 1 140px; min-width: 0; }
-.dsh-mcp-target { width: 100%; max-width: 100%; }
-@container (max-width: 560px) {
-  .dsh-mcp-row-key { flex: 1 1 100%; }
-  .dsh-mcp-row-value { flex: 1 1 60%; }
+.dsh-mcp-rows { display: flex; flex-direction: column; gap: 8px; }
+.dsh-mcp-row { display: flex; align-items: center; gap: 6px; }
+.dsh-mcp-row-input { flex: 1 1 auto; min-width: 0; }
+.dsh-mcp-row-key, .dsh-mcp-row-value { min-width: 0; width: 100%; }
+/* Key/value rows: key + remove above the value + flag, so the dialog's ~330px column never wraps either. */
+.dsh-mcp-map-row {
+  display: grid; align-items: center; gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas: 'key key remove' 'value flag remove';
 }
+.dsh-mcp-map-row > .dsh-mcp-row-key { grid-area: key; }
+.dsh-mcp-map-row > .dsh-mcp-row-value { grid-area: value; }
+.dsh-mcp-map-row > .dsh-mcp-row-flag { grid-area: flag; }
+.dsh-mcp-map-row > .dsh-mcp-row-remove { grid-area: remove; }
 .dsh-mcp-row-flag { display: inline-flex; align-items: center; gap: 4px; color: ${COLORS.secondary}; font-size: 12px; white-space: nowrap; }
 .dsh-mcp-row-remove { flex: none; }
 .dsh-mcp-tag-note { color: ${COLORS.tertiary}; font-size: 11px; }
-.dsh-mcp-footer { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .dsh-mcp-probe { display: flex; flex-direction: column; gap: 10px; }
 .dsh-mcp-probe-list { display: flex; flex-direction: column; gap: 2px; max-height: 280px; overflow: auto; }
 .dsh-mcp-probe-item { font-family: ${MONO}; font-size: 12px; padding: 3px 6px; border-radius: ${RADIUS_SM}; background: ${COLORS.surfaceSubtle}; }

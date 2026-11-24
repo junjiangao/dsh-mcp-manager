@@ -1,6 +1,6 @@
 {
   "name": "@junjiangao/dsh-mcp-manager",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "MCP server manager for DeepSeek Harness: one panel over the official mcp-manager entries and multi-scope mcp.json files, with live status, restart, probe, tools and OAuth.",
   "private": true,
   "keywords": [

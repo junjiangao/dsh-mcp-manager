@@ -1,8 +1,8 @@
 /** The create/edit dialog for one MCP server, whichever store it lives in. */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Button, Checkbox, IconCloseOutlineRegular, IconPlusOutlineRegular, Input, SegmentedControl,
+  Button, Checkbox, IconCloseOutlineRegular, IconPlusOutlineRegular, Input, Modal, SegmentedControl,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { McpLocaleKey } from './locales.ts'
 import { cx } from './panel-css.ts'
@@ -42,9 +42,24 @@ export function ServerEditor(props: ServerEditorProps) {
     if (found.length > 0) return
     props.onSave(draft)
   }
+  const bannerRef = useRef<HTMLDivElement>(null)
+  // The body scrolls now, so a rejected save has to bring its reason back into view.
+  useEffect(() => {
+    const banner = bannerRef.current
+    if (issues.length === 0 || banner === null || typeof banner.scrollIntoView !== 'function') return
+    banner.scrollIntoView({ block: 'nearest' })
+  }, [issues])
 
   return (
-    <div>
+    <Modal open onClose={props.onClose} closeLabel={t('close')}
+      title={row === undefined ? t('editor.new') : t('editor.edit', { name: row.name })}
+      className={cx('dsh-mcp-dialog')} contentClassName={cx('dsh-mcp-dialog-body')}
+      footer={(
+        <>
+          <Button variant="outline" onClick={props.onClose} disabled={props.busy}>{t('cancel')}</Button>
+          <Button variant="primary" onClick={submit} disabled={props.busy}>{props.busy ? t('saving') : t('save')}</Button>
+        </>
+      )}>
       <div className={cx('dsh-mcp-editor')}>
         <label className={cx('dsh-mcp-field')}>
           <span className={cx('dsh-mcp-field-label')}>{t('editor.target')}</span>
@@ -64,7 +79,7 @@ export function ServerEditor(props: ServerEditorProps) {
         <div className={cx('dsh-mcp-grid')}>
           <label className={cx('dsh-mcp-field')}>
             <span className={cx('dsh-mcp-field-label')}>{t('editor.name')}</span>
-            <Input value={draft.name} placeholder="codebase-memory" spellCheck={false} disabled={props.busy}
+            <Input className={cx(issues.includes('name') && 'dsh-mcp-input-invalid')} value={draft.name} placeholder="codebase-memory" spellCheck={false} disabled={props.busy}
               aria-invalid={issues.includes('name')}
               onChange={(event) => { patch({ name: event.target.value }) }} />
             <span className={cx('dsh-mcp-field-hint')}>{t('editor.nameHint')}</span>
@@ -85,7 +100,7 @@ export function ServerEditor(props: ServerEditorProps) {
             <>
               <label className={cx('dsh-mcp-field')}>
                 <span className={cx('dsh-mcp-field-label')}>{t('editor.command')}</span>
-                <Input value={draft.command} placeholder="npx" spellCheck={false} disabled={props.busy}
+                <Input className={cx(issues.includes('command') && 'dsh-mcp-input-invalid')} value={draft.command} placeholder="npx" spellCheck={false} disabled={props.busy}
                   aria-invalid={issues.includes('command')}
                   onChange={(event) => { patch({ command: event.target.value }) }} />
               </label>
@@ -94,7 +109,7 @@ export function ServerEditor(props: ServerEditorProps) {
                 <div className={cx('dsh-mcp-rows')}>
                   {draft.args.map((arg, index) => (
                     <div key={index} className={cx('dsh-mcp-row')}>
-                      <Input value={arg} spellCheck={false} disabled={props.busy} aria-label={`${t('editor.args')} ${String(index + 1)}`}
+                      <Input className={cx('dsh-mcp-row-input')} value={arg} spellCheck={false} disabled={props.busy} aria-label={`${t('editor.args')} ${String(index + 1)}`}
                         onChange={(event) => {
                           const args = [...draft.args]
                           args[index] = event.target.value
@@ -127,7 +142,7 @@ export function ServerEditor(props: ServerEditorProps) {
             <>
               <label className={cx('dsh-mcp-field')}>
                 <span className={cx('dsh-mcp-field-label')}>{t('editor.url')}</span>
-                <Input value={draft.url} placeholder="https://mcp.example.com/mcp" spellCheck={false} disabled={props.busy}
+                <Input className={cx(issues.includes('url') && 'dsh-mcp-input-invalid')} value={draft.url} placeholder="https://mcp.example.com/mcp" spellCheck={false} disabled={props.busy}
                   aria-invalid={issues.includes('url')}
                   onChange={(event) => { patch({ url: event.target.value }) }} />
               </label>
@@ -143,7 +158,7 @@ export function ServerEditor(props: ServerEditorProps) {
                 <div className={cx('dsh-mcp-grid')}>
                   <label className={cx('dsh-mcp-field')}>
                     <span className={cx('dsh-mcp-field-label')}>{t('editor.credentialKey')}</span>
-                    <Input value={draft.oauthCredentialKey} placeholder="mcp-client/example" spellCheck={false} disabled={props.busy}
+                    <Input className={cx(issues.includes('oauthKey') && 'dsh-mcp-input-invalid')} value={draft.oauthCredentialKey} placeholder="mcp-client/example" spellCheck={false} disabled={props.busy}
                       aria-invalid={issues.includes('oauthKey')}
                       onChange={(event) => { patch({ oauthCredentialKey: event.target.value }) }} />
                   </label>
@@ -230,18 +245,13 @@ export function ServerEditor(props: ServerEditorProps) {
 
         {issues.length > 0
           ? (
-            <div className={cx('dsh-mcp-banner')} data-tone="error" role="alert">
+            <div ref={bannerRef} className={cx('dsh-mcp-banner')} data-tone="error" role="alert">
               <span className={cx('dsh-mcp-banner-text')}>{issues.map(issue => t(issueKey(issue) as McpLocaleKey)).join(' · ')}</span>
             </div>
           )
           : null}
       </div>
-
-      <div className={cx('dsh-mcp-footer')} style={{ marginTop: '16px' }}>
-        <Button variant="outline" onClick={props.onClose} disabled={props.busy}>{t('cancel')}</Button>
-        <Button variant="primary" onClick={submit} disabled={props.busy}>{props.busy ? t('saving') : t('save')}</Button>
-      </div>
-    </div>
+    </Modal>
   )
 }
 
@@ -261,7 +271,7 @@ function MapRows(props: MapRowsProps) {
       <span className={cx('dsh-mcp-field-label')}>{props.label}</span>
       <div className={cx('dsh-mcp-rows')}>
         {props.rows.map((row, index) => (
-          <div key={index} className={cx('dsh-mcp-row')}>
+          <div key={index} className={cx('dsh-mcp-map-row')}>
             <Input className={cx('dsh-mcp-row-key')} value={row.key} placeholder={t('editor.keyPlaceholder')} spellCheck={false}
               title={row.key}
               disabled={props.busy} aria-label={`${props.label} ${t('editor.keyPlaceholder')} ${String(index + 1)}`}

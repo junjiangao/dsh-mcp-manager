@@ -3,7 +3,7 @@
 import { useMemo, useState, useSyncExternalStore } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  Button, IconPlusOutlineRegular, IconRefreshOutlineRegular, Input, Modal, RiskConfirmation, SegmentedControl, StateDot, Tag,
+  Button, IconPlusOutlineRegular, IconRefreshOutlineRegular, Input, RiskConfirmation, SegmentedControl, StateDot, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { McpScope } from '../types.ts'
 import type { ManagerStore } from './manager-store.ts'
@@ -245,21 +245,18 @@ export function McpSection(props: McpSectionProps) {
       <p className={cx('dsh-mcp-note')}>{t('panel.toolsNote')}</p>
 
       {editor !== undefined ? (
-        <Modal open onClose={() => { setEditor(undefined) }} closeLabel={t('close')}
-          title={editor.row === undefined ? t('editor.new') : t('editor.edit', { name: editor.row.name })}>
-          <ServerEditor
-            key={`${editor.row?.kind ?? 'new'}:${editor.row?.name ?? 'new'}`}
-            row={editor.row}
-            draft={editor.draft}
-            busy={busy}
-            entryWritable={entryWritable}
-            hasWorkspace={workspaces.length > 0}
-            hasProjectSelection={state.projectPath !== undefined}
-            t={t}
-            onClose={() => { setEditor(undefined) }}
-            onSave={saveEditor}
-          />
-        </Modal>
+        <ServerEditor
+          key={`${editor.row?.kind ?? 'new'}:${editor.row?.name ?? 'new'}`}
+          row={editor.row}
+          draft={editor.draft}
+          busy={busy}
+          entryWritable={entryWritable}
+          hasWorkspace={workspaces.length > 0}
+          hasProjectSelection={state.projectPath !== undefined}
+          t={t}
+          onClose={() => { setEditor(undefined) }}
+          onSave={saveEditor}
+        />
       ) : null}
 
       {probe !== undefined ? (

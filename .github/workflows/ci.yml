@@ -33,11 +33,15 @@ jobs:
         run: pnpm test
 
       # dsh disables any profile plugin whose @deepseek-ai/dsh* peer range the
-      # running runtime rejects, so check both ends of the supported train.
+      # running runtime rejects. The floor comes from engines.dsh in package.json,
+      # so this step cannot drift from the manifest again; the no-argument run
+      # checks the runtime the dev dependencies install.
       - name: Check dsh compatibility
         run: |
-          pnpm check:compat 0.2.0-rc.1
-          pnpm check:compat 0.2.1-alpha.1
+          floor=$(node -e "process.stdout.write(require('./package.json').engines.dsh.split(' ')[0].replace(/^[^0-9]+/, ''))")
+          echo "engines.dsh floor: $floor"
+          pnpm check:compat "$floor"
+          pnpm check:compat
 
       - name: Build
         run: pnpm build

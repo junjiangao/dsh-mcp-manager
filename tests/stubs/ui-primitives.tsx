@@ -178,8 +178,8 @@ export function SegmentedControl<Value extends string>({ id, value, options, onC
   )
 }
 
-/** Real: a portal root with a labelled dialog, backdrop, and a narrow/footer layout. */
-export function Modal({ open, title, closeLabel, description, children, footer, className }: {
+/** Real: a portal root with a labelled dialog, backdrop, a scrollable content region and a footer. */
+export function Modal({ open, title, closeLabel, description, children, footer, className, contentClassName }: {
   open: boolean
   onClose: () => void
   title: string
@@ -200,8 +200,8 @@ export function Modal({ open, title, closeLabel, description, children, footer, 
       <h2>{title}</h2>
       <button type="button" aria-label={closeLabel} onClick={() => {}}>{closeLabel}</button>
       {description !== undefined && <p>{description}</p>}
-      {children}
-      {footer}
+      <div data-modal-content className={contentClassName}>{children}</div>
+      <div data-modal-footer>{footer}</div>
     </div>
   )
 }
